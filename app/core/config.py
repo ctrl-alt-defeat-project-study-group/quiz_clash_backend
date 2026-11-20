@@ -1,19 +1,29 @@
 """
 Application configuration settings
 """
-from pydantic_settings import BaseSettings
-from typing import List, Optional
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List, Optional, Union
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+
     # Database
-    DATABASE_URL: str = "postgresql+psycopg://quizclash:quizclash@localhost:5432/quizclash"
+    DATABASE_URL: str = "postgresql+psycopg2://quizclash:quizclash@localhost:5432/quizclash"
     
     # CORS
-    FRONTEND_ORIGINS: List[str] = [
+    FRONTEND_ORIGINS: Union[List[str], str] = [
         "http://localhost:5173",  # Vite default
         "http://localhost:3000",  # Create React App default
     ]
+
+    @field_validator("FRONTEND_ORIGINS", mode="before")
+    @classmethod
+    def parse_frontend_origins(cls, v):
+        if isinstance(v, str):
+            return [o.strip() for o in v.split(",") if o.strip()]
+        return v
     
     # File upload settings
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file size in MB
@@ -31,9 +41,5 @@ class Settings(BaseSettings):
     # PDF Generation
     PDF_FONT_NAME: str = "Helvetica"  # For Japanese, we'll need to add a CJK font
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-
 
 settings = Settings()

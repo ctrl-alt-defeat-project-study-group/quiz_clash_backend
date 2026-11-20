@@ -2,7 +2,7 @@
 Service for generating multiple choice questions from parsed content
 """
 import random
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from fastapi import HTTPException
 from app.core.config import settings
 

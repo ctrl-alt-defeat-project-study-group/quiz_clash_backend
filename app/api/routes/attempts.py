@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.db.models import Quiz, Question, Choice, Attempt, AttemptAnswer
 from app.schemas.attempt import AttemptCreate, AttemptResponse
-from app.schemas.quiz import AnswerSubmission
 
 router = APIRouter()
 

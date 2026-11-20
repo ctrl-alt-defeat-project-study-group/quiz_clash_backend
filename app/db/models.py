@@ -76,7 +76,7 @@ class AttemptAnswer(Base):
     id = Column(Integer, primary_key=True, index=True)
     attempt_id = Column(Integer, ForeignKey("attempts.id"), nullable=False)
     question_id = Column(Integer, nullable=False)  # Reference to question, not ForeignKey for flexibility
-    choice_id = Column(Integer, nullable=False)  # Reference to choice
+    choice_id = Column(Integer, ForeignKey("choices.id"), nullable=False)  # Reference to choice
     is_correct = Column(Boolean, nullable=False)
     
     # Relationships

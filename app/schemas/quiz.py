@@ -30,7 +30,7 @@ class QuestionBase(BaseModel):
 
 
 class QuestionCreate(QuestionBase):
-    choices: List[ChoiceCreate] = Field(..., min_items=4, max_items=4)
+    choices: List[ChoiceCreate] = Field(..., min_length=4, max_length=4)
 
 
 class QuestionResponse(QuestionBase):
@@ -47,7 +47,7 @@ class QuizBase(BaseModel):
 
 
 class QuizCreate(QuizBase):
-    source_type: str = Field(..., regex="^(csv|txt|structured|llm)$")
+    source_type: str = Field(..., pattern="^(csv|txt|structured|llm)$")
     questions: List[QuestionCreate]
 
 

@@ -51,7 +51,7 @@ pip install -r requirements.txt
 cp .env.example .env
 
 # Edit .env with your database credentials
-# DATABASE_URL=postgresql+psycopg://username:password@localhost:5432/dbname
+# DATABASE_URL=postgresql+psycopg2://username:password@localhost:5432/dbname
 ```
 
 ### 3. Database Setup
