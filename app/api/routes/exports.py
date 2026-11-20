@@ -1,27 +1,35 @@
 """
-API routes for quiz exports (PDF generation)
+API routes for quiz exports (PDF & Word generation, EN / MM)
 """
+import logging
 import os
 import re
 import tempfile
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, selectinload
 from starlette.background import BackgroundTask
 
 from app.core.deps import ensure_owner_or_admin, get_current_user
+from app.core.errors import api_error
 from app.core.ids import parse_prefixed_id
+from app.core.language import resolve_request_language
+from app.db.models import Question, Quiz, User
 from app.db.session import get_db
-from app.db.models import Quiz, Question, User
+from app.services.docx_generator import DocxGenerator
 from app.services.pdf_generator import PDFGenerator
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 def _sanitize_filename(title: str) -> str:
     """Sanitize a quiz title into a safe ASCII filename stem."""
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", title).strip("_")
-    return (cleaned[:100] if cleaned else "quiz")
+    return cleaned[:100] if cleaned else "quiz"
 
 
 def _cleanup_file(path: str) -> None:
@@ -36,27 +44,47 @@ def _cleanup_file(path: str) -> None:
 def export_quiz_pdf(
     quiz_id: str,
     kind: str = "questions",  # "questions" or "answers"
+    format: str = "pdf",  # "pdf" or "word"
+    lang: Optional[str] = None,  # "en" or "mm" ("my" alias accepted)
+    accept_language: Optional[str] = Header(default=None, alias="Accept-Language"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Export quiz as PDF.
+    Export quiz as PDF or Word (.docx) in English or Myanmar.
 
-    - **kind**: "questions" for questions-only PDF, "answers" for answer key PDF
+    - **kind**: "questions" for blank study sheet, "answers" for answer key
+    - **format**: "pdf" (default) or "word"
+    - **lang**: "en" (default) or "mm" ("my" accepted as alias)
     """
     if kind not in ("questions", "answers"):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid kind parameter. Use 'questions' or 'answers'",
+        raise api_error(
+            400,
+            "VALIDATION_ERROR",
+            "Invalid kind parameter. Use 'questions' or 'answers'.",
         )
 
+    export_format = format.strip().lower()
+    if export_format not in ("pdf", "word"):
+        raise api_error(
+            400,
+            "VALIDATION_ERROR",
+            "Invalid format parameter. Use 'pdf' or 'word'.",
+        )
+
+    resolved_lang = resolve_request_language(lang, accept_language)
+
     quiz_numeric_id = parse_prefixed_id(
-        quiz_id, "quiz", status_code=400, detail="Invalid quiz ID format"
+        quiz_id,
+        "quiz",
+        status_code=404,
+        detail="Quiz not found.",
+        code="QUIZ_NOT_FOUND",
     )
 
     db_quiz = db.query(Quiz).filter(Quiz.id == quiz_numeric_id).first()
     if not db_quiz:
-        raise HTTPException(status_code=404, detail="Quiz not found")
+        raise api_error(404, "QUIZ_NOT_FOUND", "Quiz not found.")
 
     ensure_owner_or_admin(db_quiz.owner_id, current_user)
 
@@ -69,7 +97,7 @@ def export_quiz_pdf(
     )
 
     if not db_questions:
-        raise HTTPException(status_code=400, detail="Quiz has no questions")
+        raise api_error(400, "VALIDATION_ERROR", "Quiz has no questions.")
 
     questions_data = []
 
@@ -79,6 +107,7 @@ def export_quiz_pdf(
         question_data = {
             "number": q_idx + 1,
             "prompt": db_question.prompt,
+            "explanation": db_question.explanation,
             "choices": [],
         }
 
@@ -99,35 +128,61 @@ def export_quiz_pdf(
 
         questions_data.append(question_data)
 
-    pdf_generator = PDFGenerator()
     safe_title = _sanitize_filename(db_quiz.title)
+    suffix = ".pdf" if export_format == "pdf" else ".docx"
+    media_type = "application/pdf" if export_format == "pdf" else DOCX_MIME_TYPE
+    filename = f"quiz_{kind}_{safe_title}{suffix}"
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        pdf_path = tmp_file.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+        out_path = tmp_file.name
 
     try:
-        if kind == "questions":
-            pdf_generator.generate_questions_pdf(
-                quiz_title=db_quiz.title,
-                questions=questions_data,
-                output_path=pdf_path,
-            )
-            filename = f"quiz_questions_{safe_title}.pdf"
+        if export_format == "pdf":
+            pdf_generator = PDFGenerator()
+            if kind == "questions":
+                pdf_generator.generate_questions_pdf(
+                    quiz_title=db_quiz.title,
+                    questions=questions_data,
+                    output_path=out_path,
+                    lang=resolved_lang,
+                )
+            else:
+                pdf_generator.generate_answers_pdf(
+                    quiz_title=db_quiz.title,
+                    questions=questions_data,
+                    output_path=out_path,
+                    lang=resolved_lang,
+                )
         else:
-            pdf_generator.generate_answers_pdf(
-                quiz_title=db_quiz.title,
-                questions=questions_data,
-                output_path=pdf_path,
-            )
-            filename = f"quiz_answers_{safe_title}.pdf"
-    except Exception:
-        _cleanup_file(pdf_path)
+            docx_generator = DocxGenerator()
+            if kind == "questions":
+                docx_generator.generate_questions_docx(
+                    quiz_title=db_quiz.title,
+                    questions=questions_data,
+                    output_path=out_path,
+                    lang=resolved_lang,
+                )
+            else:
+                docx_generator.generate_answers_docx(
+                    quiz_title=db_quiz.title,
+                    questions=questions_data,
+                    output_path=out_path,
+                    lang=resolved_lang,
+                )
+    except HTTPException:
+        _cleanup_file(out_path)
         raise
+    except Exception:
+        _cleanup_file(out_path)
+        logger.exception(
+            "Failed to generate %s (%s) export for quiz %s", kind, export_format, quiz_id
+        )
+        raise api_error(500, "EXPORT_FAILED", "Failed to generate quiz export.")
 
     return FileResponse(
-        path=pdf_path,
+        path=out_path,
         filename=filename,
-        media_type="application/pdf",
+        media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        background=BackgroundTask(_cleanup_file, pdf_path),
+        background=BackgroundTask(_cleanup_file, out_path),
     )

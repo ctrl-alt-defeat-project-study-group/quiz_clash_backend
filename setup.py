@@ -19,6 +19,9 @@ setup(
         "argon2-cffi>=23.1.0",
         "PyJWT>=2.8.0",
         "reportlab==4.0.4",
+        "weasyprint>=60.0",
+        "pypdf>=4.0.0",
+        "python-docx>=1.1.0",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.11",
 )

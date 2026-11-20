@@ -1,9 +1,9 @@
 """
 Pydantic schemas for quiz-related data validation
 """
-from pydantic import BaseModel, Field
-from typing import List, Optional
 from datetime import datetime
+from typing import List, Optional
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # Choice schemas
@@ -17,10 +17,9 @@ class ChoiceCreate(ChoiceBase):
 
 
 class ChoiceResponse(ChoiceBase):
-    id: str  # Will be like "a", "b", "c", "d"
-    
-    class Config:
-        from_attributes = True
+    id: str  # "a", "b", "c", "d"
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ChoicePreviewResponse(ChoiceResponse):
@@ -34,23 +33,43 @@ class QuestionBase(BaseModel):
 
 
 class QuestionCreate(QuestionBase):
+    explanation: Optional[str] = None
     choices: List[ChoiceCreate] = Field(..., min_length=4, max_length=4)
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_not_empty(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Question prompt must not be empty.")
+        return value.strip()
+
+    @field_validator("choices")
+    @classmethod
+    def validate_choices(cls, choices: List[ChoiceCreate]) -> List[ChoiceCreate]:
+        if len(choices) != 4:
+            raise ValueError("Each question must have exactly 4 choices.")
+        for choice in choices:
+            if not choice.text or not choice.text.strip():
+                raise ValueError("Choice text must not be empty.")
+        correct_count = sum(1 for c in choices if c.is_correct)
+        if correct_count != 1:
+            raise ValueError("Each question must have exactly 1 correct choice.")
+        return choices
 
 
 class QuestionResponse(QuestionBase):
-    id: str  # Will be like "q_1", "q_2", etc.
+    id: str  # "q_1", "q_2", etc.
     choices: List[ChoiceResponse]
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class QuestionPreviewResponse(QuestionBase):
     id: str
+    explanation: Optional[str] = None
     choices: List[ChoicePreviewResponse]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Quiz schemas
@@ -59,30 +78,47 @@ class QuizBase(BaseModel):
 
 
 class QuizCreate(QuizBase):
-    source_type: str = Field(..., pattern="^(csv|txt|structured|llm)$")
+    category: Optional[str] = Field(default=None, max_length=100)
+    source_type: str = Field(..., pattern="^(csv|txt|pdf|docx|structured|llm)$")
     questions: List[QuestionCreate]
 
 
 class QuizUpdate(BaseModel):
     title: Optional[str] = Field(default=None, max_length=255)
-    source_type: Optional[str] = Field(default=None, pattern="^(csv|txt|structured|llm)$")
-    questions: Optional[List[QuestionCreate]] = None
+    category: Optional[str] = Field(default=None, max_length=100)
+    source_type: Optional[str] = Field(default=None, pattern="^(csv|txt|pdf|docx|structured|llm)$")
+    questions: Optional[List[QuestionCreate]] = Field(default=None, min_length=1)
 
 
 class QuizResponse(QuizBase):
-    id: str  # Will be like "quiz_123"
+    id: str  # "quiz_123"
+    category: Optional[str] = None
     source_type: str
+    source_filename: Optional[str] = None
     status: str
     created_at: datetime
+    updated_at: datetime
     questions: List[QuestionResponse]
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class QuizPreviewResponse(QuizResponse):
-    """Response for quiz preview/editing - includes correct answers"""
+    """Response for quiz preview/editing - includes correct answers and explanations"""
     questions: List[QuestionPreviewResponse]
+
+
+class QuizSummaryResponse(BaseModel):
+    """Summary item for GET /api/v1/quizzes"""
+    id: str
+    title: str
+    category: Optional[str] = None
+    source_filename: Optional[str] = None
+    question_count: int
+    last_score: Optional[float] = None
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # File upload schemas
@@ -95,5 +131,6 @@ class FileUpload(BaseModel):
 class GenerateQuizRequest(BaseModel):
     """Request to generate quiz from uploaded content"""
     title: Optional[str] = Field(default=None, max_length=255)
+    category: Optional[str] = Field(default=None, max_length=100)
     use_llm: bool = Field(default=False)
     question_count: Optional[int] = Field(default=None, ge=1, le=50)

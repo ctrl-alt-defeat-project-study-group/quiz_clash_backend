@@ -38,6 +38,19 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    settings = relationship(
+        "UserSettings",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    hosted_rooms = relationship(
+        "LiveRoom",
+        back_populates="host",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class EmailToken(Base):
@@ -71,10 +84,17 @@ class Quiz(Base):
         index=True,
     )
     title = Column(String(255), nullable=False, default="Untitled Quiz")
+    category = Column(String(100), nullable=True)
     source_type = Column(String(50), nullable=False)  # "csv", "txt", "structured", "llm"
+    source_filename = Column(String(255), nullable=True)
     source_hash = Column(String(64), nullable=True, index=True)  # For duplicate detection
-    status = Column(String(50), nullable=False, default="draft")  # draft, published, archived
+    status = Column(String(50), nullable=False, default="ready")  # ready, draft, published, archived
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
     # Relationships
     owner = relationship("User", back_populates="quizzes")
@@ -86,6 +106,12 @@ class Quiz(Base):
     )
     attempts = relationship(
         "Attempt",
+        back_populates="quiz",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    live_rooms = relationship(
+        "LiveRoom",
         back_populates="quiz",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -104,6 +130,7 @@ class Question(Base):
     )
     prompt = Column(Text, nullable=False)
     position = Column(Integer, nullable=False, default=0)  # Order in quiz
+    explanation = Column(Text, nullable=True)
 
     # Relationships
     quiz = relationship("Quiz", back_populates="questions")
@@ -163,6 +190,7 @@ class Attempt(Base):
     )
     score = Column(Integer, nullable=False, default=0)
     total_questions = Column(Integer, nullable=False)
+    duration_seconds = Column(Integer, nullable=True)
     completed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
@@ -204,3 +232,59 @@ class AttemptAnswer(Base):
     attempt = relationship("Attempt", back_populates="answers")
     question = relationship("Question", back_populates="attempt_answers")
     choice = relationship("Choice", back_populates="attempt_answers")
+
+
+class LiveRoom(Base):
+    __tablename__ = "live_rooms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    quiz_id = Column(
+        Integer,
+        ForeignKey("quizzes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    host_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pin = Column(String(6), unique=True, index=True, nullable=False)
+    timer_seconds = Column(Integer, nullable=False, default=20)
+    status = Column(String(20), nullable=False, default="lobby")  # lobby, active, finished, closed
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    quiz = relationship("Quiz", back_populates="live_rooms")
+    host = relationship("User", back_populates="hosted_rooms")
+
+
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    theme = Column(String(20), nullable=False, default="system")
+    ui_language = Column(String(10), nullable=False, default="en")
+    default_questions = Column(Integer, nullable=False, default=10)
+    difficulty = Column(String(30), nullable=False, default="Mixed")
+    quiz_language = Column(String(30), nullable=False, default="English")
+    shuffle_questions = Column(Boolean, nullable=False, default=True)
+    show_explanations = Column(Boolean, nullable=False, default=True)
+    study_reminders = Column(Boolean, nullable=False, default=False)
+    weekly_summary = Column(Boolean, nullable=False, default=True)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    # Relationships
+    user = relationship("User", back_populates="settings")

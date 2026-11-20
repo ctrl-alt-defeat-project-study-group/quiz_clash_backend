@@ -12,16 +12,9 @@ from fastapi import HTTPException, Response
 import jwt
 
 from app.core.config import settings
+from app.core.errors import api_error
 
 _password_hasher = PasswordHasher()
-
-
-def api_error(status_code: int, code: str, message: str) -> HTTPException:
-    """Build a structured HTTPException matching the API contract."""
-    return HTTPException(
-        status_code=status_code,
-        detail={"code": code, "message": message},
-    )
 
 
 def validate_password_strength(password: str) -> None:

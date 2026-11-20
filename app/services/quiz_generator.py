@@ -2,9 +2,11 @@
 Service for generating multiple choice questions from parsed content
 """
 import random
-from typing import List, Tuple, Dict, Any, Optional
-from fastapi import HTTPException
+from typing import Any, Dict, List, Optional, Tuple
+
 from app.core.config import settings
+from app.core.errors import api_error
+from app.core.language import format_question_prompt
 
 
 class QuizGenerator:
@@ -14,6 +16,7 @@ class QuizGenerator:
     def generate_from_structured(
         terms_definitions: List[Tuple[str, str]],
         question_count: Optional[int] = None,
+        language: str = "en",
     ) -> List[Dict[str, Any]]:
         """
         Generate MCQs from structured term-definition pairs.
@@ -23,18 +26,20 @@ class QuizGenerator:
             question_count: Number of questions to generate (default: all or up to max)
 
         Returns:
-            List of question dictionaries with prompt and choices
+            List of question dictionaries with prompt, explanation, and choices
         """
         if not terms_definitions:
-            raise HTTPException(
-                status_code=400,
-                detail="No valid terms and definitions found",
+            raise api_error(
+                400,
+                "EMPTY_FILE",
+                "No valid terms and definitions found.",
             )
 
         if question_count is not None and question_count <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="question_count must be greater than 0",
+            raise api_error(
+                422,
+                "VALIDATION_ERROR",
+                "question_count must be greater than 0.",
             )
 
         # Filter empty entries and deduplicate pairs by normalized term
@@ -52,13 +57,12 @@ class QuizGenerator:
             valid_pairs.append((term, definition))
 
         if len(valid_pairs) < settings.MIN_DEFINITIONS_FOR_GENERATION:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Need at least {settings.MIN_DEFINITIONS_FOR_GENERATION} "
-                    f"unique terms with definitions to generate questions. "
-                    f"Found only {len(valid_pairs)}."
-                ),
+            raise api_error(
+                400,
+                "EMPTY_FILE",
+                f"Need at least {settings.MIN_DEFINITIONS_FOR_GENERATION} "
+                f"unique terms with definitions to generate questions. "
+                f"Found only {len(valid_pairs)}.",
             )
 
         # Build deduplicated definition pool (case-insensitive) for unique distractors
@@ -105,7 +109,8 @@ class QuizGenerator:
 
             questions.append(
                 {
-                    "prompt": f"What does '{term}' mean?",
+                    "prompt": format_question_prompt(term, language),
+                    "explanation": f"{term}: {correct_definition}",
                     "position": len(questions),
                     "choices": choices,
                 }
@@ -117,44 +122,50 @@ class QuizGenerator:
     def validate_questions(questions: List[Dict[str, Any]]) -> None:
         """Validate generated questions meet requirements"""
         if not questions:
-            raise HTTPException(
-                status_code=400,
-                detail="No questions were generated",
+            raise api_error(
+                500,
+                "GENERATION_FAILED",
+                "No questions were generated.",
             )
 
         for i, question in enumerate(questions):
             if not question.get("prompt") or not isinstance(question["prompt"], str):
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Question {i+1}: Invalid or missing prompt",
+                raise api_error(
+                    500,
+                    "GENERATION_FAILED",
+                    f"Question {i+1}: Invalid or missing prompt.",
                 )
 
             choices = question.get("choices", [])
             if len(choices) != 4:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Question {i+1}: Must have exactly 4 choices, got {len(choices)}",
+                raise api_error(
+                    500,
+                    "GENERATION_FAILED",
+                    f"Question {i+1}: Must have exactly 4 choices, got {len(choices)}.",
                 )
 
             correct_choices = [c for c in choices if c.get("is_correct")]
             if len(correct_choices) != 1:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Question {i+1}: Must have exactly one correct choice, got {len(correct_choices)}",
+                raise api_error(
+                    500,
+                    "GENERATION_FAILED",
+                    f"Question {i+1}: Must have exactly one correct choice, got {len(correct_choices)}.",
                 )
 
             choice_texts = [c.get("text", "").strip() for c in choices]
             if len(set(choice_texts)) != len(choice_texts):
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Question {i+1}: Contains duplicate choice texts",
+                raise api_error(
+                    500,
+                    "GENERATION_FAILED",
+                    f"Question {i+1}: Contains duplicate choice texts.",
                 )
 
             for j, choice in enumerate(choices):
                 if not choice.get("text") or not isinstance(choice["text"], str):
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Question {i+1}, Choice {j+1}: Invalid or missing text",
+                    raise api_error(
+                        500,
+                        "GENERATION_FAILED",
+                        f"Question {i+1}, Choice {j+1}: Invalid or missing text.",
                     )
 
     @staticmethod
@@ -166,12 +177,14 @@ class QuizGenerator:
         formatted_questions = []
 
         for q_idx, question in enumerate(questions):
-            formatted_question = {
+            formatted_question: Dict[str, Any] = {
                 "id": f"q_{q_idx + 1}",
                 "prompt": question["prompt"],
                 "position": question.get("position", q_idx),
                 "choices": [],
             }
+            if include_correct:
+                formatted_question["explanation"] = question.get("explanation")
 
             sorted_choices = sorted(question["choices"], key=lambda c: c.get("position", 0))
 

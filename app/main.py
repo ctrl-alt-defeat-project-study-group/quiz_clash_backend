@@ -3,17 +3,32 @@ QuizClash Backend - Main FastAPI Application
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.csrf import CSRFOriginMiddleware
-from app.api.routes import admin, attempts, auth, exports, quizzes
+from app.core.errors import (
+    unhandled_exception_handler,
+    validation_exception_handler,
+)
+from app.core.production import validate_production_settings
+from app.api.routes import (
+    admin,
+    attempts,
+    auth,
+    exports,
+    live,
+    quizzes,
+    settings as settings_routes,
+)
 from app.services.bootstrap import seed_initial_admin
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Schema is managed by Alembic migrations (not create_all at startup)
+    # Fail fast on unsafe production settings; schema is managed by Alembic migrations
+    validate_production_settings(settings)
     seed_initial_admin()
     yield
 
@@ -38,19 +53,25 @@ app.add_middleware(
 # CSRF protection for state-changing requests
 app.add_middleware(CSRFOriginMiddleware)
 
+# Register global exception handlers
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
+
 # Include API routers
 app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
 app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
 app.include_router(quizzes.router, prefix="/api/v1", tags=["quizzes"])
 app.include_router(attempts.router, prefix="/api/v1", tags=["attempts"])
 app.include_router(exports.router, prefix="/api/v1", tags=["exports"])
+app.include_router(live.router, prefix="/api/v1", tags=["live"])
+app.include_router(settings_routes.router, prefix="/api/v1", tags=["settings"])
 
 
 # Health check endpoint
 @app.get("/api/v1/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "QuizClash API"}
+    return {"status": "ok", "service": "quiz-clash-api"}
 
 
 @app.get("/")

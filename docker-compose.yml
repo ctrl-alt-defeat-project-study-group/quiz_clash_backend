@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-quizclash}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quizclash}
+      POSTGRES_DB: ${POSTGRES_DB:-quizclash}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quizclash} -d ${POSTGRES_DB:-quizclash}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-quizclash}:${POSTGRES_PASSWORD:-quizclash}@db:5432/${POSTGRES_DB:-quizclash}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
+      SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-key-change-in-production}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+    volumes:
+      - .:/app
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  postgres_data:

@@ -9,6 +9,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
+    # Runtime environment ("development" | "staging" | "production")
+    ENVIRONMENT: str = "development"
+
     # Database
     DATABASE_URL: str = "postgresql+psycopg2://quizclash:quizclash@localhost:5432/quizclash"
 
@@ -62,7 +65,7 @@ class Settings(BaseSettings):
 
     # File upload settings
     MAX_UPLOAD_SIZE_MB: int = 10
-    ALLOWED_FILE_TYPES: List[str] = [".csv", ".txt"]
+    ALLOWED_FILE_TYPES: List[str] = [".csv", ".txt", ".pdf", ".docx"]
 
     # Quiz generation settings
     DEFAULT_QUESTIONS_PER_QUIZ: int = 10

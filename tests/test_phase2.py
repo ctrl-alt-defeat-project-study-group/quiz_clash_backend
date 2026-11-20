@@ -105,7 +105,7 @@ def test_grading_ids_second_quiz_and_preview_patch(client):
         files={"file": ("set1.csv", _make_csv_bytes(SAMPLE_PAIRS_1), "text/csv")},
         data={"title": "First Quiz", "question_count": "5"},
     )
-    assert r1.status_code == 200
+    assert r1.status_code == 201
     q1 = r1.json()
     assert len(q1["questions"]) == 5
 
@@ -115,7 +115,7 @@ def test_grading_ids_second_quiz_and_preview_patch(client):
         files={"file": ("set2.csv", _make_csv_bytes(SAMPLE_PAIRS_2), "text/csv")},
         data={"title": "Second Quiz", "question_count": "5"},
     )
-    assert r2.status_code == 200
+    assert r2.status_code == 201
     q2 = r2.json()
     q2_ids = [q["id"] for q in q2["questions"]]
     assert q2_ids != ["q_1", "q_2", "q_3", "q_4", "q_5"]
@@ -148,21 +148,22 @@ def test_grading_ids_second_quiz_and_preview_patch(client):
         f"/api/v1/quizzes/{q2['id']}/attempts",
         json={"answers": answers},
     )
-    assert att_resp.status_code == 200
+    assert att_resp.status_code == 201
     att = att_resp.json()
+    assert att["id"].startswith("att_")
     assert att["score"] == 5
     assert att["total_questions"] == 5
     assert att["percentage"] == 100.0
 
-    # GET attempt works with both attempt_N and att_N
+    # GET attempt works with both att_N and legacy attempt_N
     get_att = client.get(f"/api/v1/attempts/{att['id']}")
     assert get_att.status_code == 200
     assert get_att.json()["score"] == 5
 
-    short_id = att["id"].replace("attempt_", "att_")
-    get_att_short = client.get(f"/api/v1/attempts/{short_id}")
-    assert get_att_short.status_code == 200
-    assert get_att_short.json()["score"] == 5
+    legacy_id = att["id"].replace("att_", "attempt_")
+    get_att_legacy = client.get(f"/api/v1/attempts/{legacy_id}")
+    assert get_att_legacy.status_code == 200
+    assert get_att_legacy.json()["score"] == 5
 
 
 def test_attempt_validation_rejects_bad_answers_before_insert(client):
@@ -171,7 +172,7 @@ def test_attempt_validation_rejects_bad_answers_before_insert(client):
         files={"file": ("set1.csv", _make_csv_bytes(SAMPLE_PAIRS_1), "text/csv")},
         data={"title": "Validation Quiz", "question_count": "5"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 201
     quiz = r.json()
     first_qid = quiz["questions"][0]["id"]
 
@@ -222,7 +223,7 @@ def test_exports_stream_pdf_sanitize_filename_and_escape_xml(client):
         files={"file": ("special.csv", _make_csv_bytes(SAMPLE_PAIRS_2), "text/csv")},
         data={"title": 'Bio <101> / "Cell" & DNA\r\n;Test', "question_count": "5"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 201
     quiz_id = r.json()["id"]
 
     for kind in ("questions", "answers"):
@@ -241,15 +242,17 @@ def test_parser_reraises_http_exception_size_limit_and_line_by_line_txt():
     with pytest.raises(HTTPException) as exc:
         FileParser.parse_csv(empty_csv)
     assert exc.value.status_code == 400
-    assert not str(exc.value.detail).startswith("Error parsing CSV file:")
+    assert exc.value.detail["code"] == "EMPTY_FILE"
+    assert not exc.value.detail["message"].startswith("Error parsing CSV file:")
 
     # Enforces settings.MAX_UPLOAD_SIZE_MB
     big_file = UploadFile(filename="big.txt", file=io.BytesIO(b"a" * (2 * 1024 * 1024)))
     with patch.object(settings, "MAX_UPLOAD_SIZE_MB", 1):
         with pytest.raises(HTTPException) as exc:
             FileParser.validate_file(big_file)
-        assert exc.value.status_code == 400
-        assert "1MB" in exc.value.detail
+        assert exc.value.status_code == 413
+        assert exc.value.detail["code"] == "FILE_TOO_LARGE"
+        assert "1MB" in exc.value.detail["message"]
 
     # Line-by-line mixed-separator TXT parsing
     txt_content = (
@@ -300,7 +303,7 @@ def test_quiz_post_duplicate_detection_before_generation_and_honors_params(clien
         files={"file": ("bio.csv", csv_bytes, "text/csv")},
         data={"title": "Bio Quiz", "question_count": "5"},
     )
-    assert r1.status_code == 200
+    assert r1.status_code == 201
     id1 = r1.json()["id"]
     assert len(r1.json()["questions"]) == 5
 
@@ -313,7 +316,7 @@ def test_quiz_post_duplicate_detection_before_generation_and_honors_params(clien
             files={"file": ("bio.csv", csv_bytes, "text/csv")},
             data={"title": "Bio Quiz", "question_count": "5"},
         )
-        assert r_dup.status_code == 200
+        assert r_dup.status_code == 201
         assert r_dup.json()["id"] == id1
 
     # New title creates a new quiz
@@ -322,7 +325,7 @@ def test_quiz_post_duplicate_detection_before_generation_and_honors_params(clien
         files={"file": ("bio.csv", csv_bytes, "text/csv")},
         data={"title": "Bio Quiz v2", "question_count": "5"},
     )
-    assert r_new_title.status_code == 200
+    assert r_new_title.status_code == 201
     assert r_new_title.json()["id"] != id1
     assert r_new_title.json()["title"] == "Bio Quiz v2"
 
@@ -330,8 +333,8 @@ def test_quiz_post_duplicate_detection_before_generation_and_honors_params(clien
     r_new_count = client.post(
         "/api/v1/quizzes",
         files={"file": ("bio.csv", csv_bytes, "text/csv")},
-        data={"title": "Bio Quiz", "question_count": "8"},
+        data={"title": "Bio Quiz", "question_count": "10"},
     )
-    assert r_new_count.status_code == 200
+    assert r_new_count.status_code == 201
     assert r_new_count.json()["id"] != id1
-    assert len(r_new_count.json()["questions"]) == 8
+    assert len(r_new_count.json()["questions"]) == 10

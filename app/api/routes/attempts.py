@@ -2,14 +2,19 @@
 API routes for quiz attempts
 """
 from typing import Dict, List, Tuple
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.deps import ensure_owner_or_admin, get_current_user
+from app.core.errors import api_error
 from app.core.ids import parse_prefixed_id
+from app.db.models import Attempt, AttemptAnswer, Choice, Question, Quiz, User
 from app.db.session import get_db
-from app.db.models import Quiz, Question, Choice, Attempt, AttemptAnswer, User
-from app.schemas.attempt import AttemptCreate, AttemptResponse
+from app.schemas.attempt import (
+    AttemptCreate,
+    AttemptResponse,
+    AttemptSummaryResponse,
+)
 
 router = APIRouter()
 
@@ -35,7 +40,43 @@ def get_choice_mapping(questions: List[Question]) -> Dict[str, Dict[str, Choice]
     return choice_mapping
 
 
-@router.post("/quizzes/{quiz_id}/attempts", response_model=AttemptResponse)
+@router.get("/attempts", response_model=List[AttemptSummaryResponse])
+def list_attempts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List the authenticated user's quiz attempts ordered by most recent first."""
+    attempts = (
+        db.query(Attempt)
+        .options(selectinload(Attempt.quiz))
+        .filter(Attempt.user_id == current_user.id)
+        .order_by(Attempt.completed_at.desc(), Attempt.id.desc())
+        .all()
+    )
+
+    results = []
+    for db_attempt in attempts:
+        percentage = (
+            (db_attempt.score / db_attempt.total_questions * 100)
+            if db_attempt.total_questions > 0
+            else 0.0
+        )
+        results.append(
+            {
+                "id": f"att_{db_attempt.id}",
+                "quiz_id": f"quiz_{db_attempt.quiz_id}",
+                "quiz_title": db_attempt.quiz.title if db_attempt.quiz else "Untitled Quiz",
+                "score": db_attempt.score,
+                "total_questions": db_attempt.total_questions,
+                "percentage": round(percentage, 2),
+                "duration_seconds": db_attempt.duration_seconds,
+                "completed_at": db_attempt.completed_at,
+            }
+        )
+    return results
+
+
+@router.post("/quizzes/{quiz_id}/attempts", response_model=AttemptResponse, status_code=201)
 def submit_attempt(
     quiz_id: str,
     attempt_data: AttemptCreate,
@@ -51,7 +92,11 @@ def submit_attempt(
     - Returns detailed results
     """
     quiz_numeric_id = parse_prefixed_id(
-        quiz_id, "quiz", status_code=400, detail="Invalid quiz ID format"
+        quiz_id,
+        "quiz",
+        status_code=404,
+        detail="Quiz not found.",
+        code="QUIZ_NOT_FOUND",
     )
 
     db_quiz = (
@@ -61,13 +106,13 @@ def submit_attempt(
         .first()
     )
     if not db_quiz:
-        raise HTTPException(status_code=404, detail="Quiz not found")
+        raise api_error(404, "QUIZ_NOT_FOUND", "Quiz not found.")
 
     ensure_owner_or_admin(db_quiz.owner_id, current_user)
 
     db_questions = sorted(db_quiz.questions, key=lambda q: q.position)
     if not db_questions:
-        raise HTTPException(status_code=400, detail="Quiz has no questions")
+        raise api_error(400, "VALIDATION_ERROR", "Quiz has no questions.")
 
     choice_mapping = get_choice_mapping(db_questions)
     question_map = {f"q_{q.id}": q for q in db_questions}
@@ -77,34 +122,37 @@ def submit_attempt(
     seen_question_ids = set()
 
     for answer in attempt_data.answers:
-        # Ensure question_id has valid prefixed/numeric format
         q_numeric_id = parse_prefixed_id(
             answer.question_id,
             "q",
             status_code=400,
             detail=f"Invalid question ID format: {answer.question_id}",
+            code="VALIDATION_ERROR",
         )
         normalized_qid = f"q_{q_numeric_id}"
 
         if normalized_qid in seen_question_ids:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Duplicate answer for question: {normalized_qid}",
+            raise api_error(
+                400,
+                "VALIDATION_ERROR",
+                f"Duplicate answer for question: {normalized_qid}",
             )
         seen_question_ids.add(normalized_qid)
 
         db_question = question_map.get(normalized_qid)
         if not db_question:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown question ID for this quiz: {answer.question_id}",
+            raise api_error(
+                400,
+                "VALIDATION_ERROR",
+                f"Unknown question ID for this quiz: {answer.question_id}",
             )
 
         correct_choice = next((c for c in db_question.choices if c.is_correct), None)
         if not correct_choice:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Question {normalized_qid} has no correct choice configured",
+            raise api_error(
+                500,
+                "SERVER_ERROR",
+                f"Question {normalized_qid} has no correct choice configured.",
             )
 
         selected_choice_letter = answer.choice_id.strip().lower()
@@ -112,12 +160,10 @@ def submit_attempt(
             selected_choice_letter
         )
         if not selected_choice:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Invalid choice ID '{answer.choice_id}' "
-                    f"for question '{normalized_qid}'"
-                ),
+            raise api_error(
+                400,
+                "VALIDATION_ERROR",
+                f"Invalid choice ID '{answer.choice_id}' for question '{normalized_qid}'",
             )
 
         validated_entries.append(
@@ -130,6 +176,7 @@ def submit_attempt(
         user_id=current_user.id,
         score=0,
         total_questions=len(db_questions),
+        duration_seconds=attempt_data.duration_seconds,
     )
     db.add(db_attempt)
     db.flush()
@@ -160,22 +207,25 @@ def submit_attempt(
                     db_question.choices, correct_choice.id
                 ),
                 "correct_choice_text": correct_choice.text,
+                "explanation": db_question.explanation,
                 "is_correct": is_correct,
             }
         )
 
     db_attempt.score = correct_count
-    percentage = (correct_count / len(db_questions) * 100) if db_questions else 0
+    percentage = (correct_count / len(db_questions) * 100) if db_questions else 0.0
 
     db.commit()
     db.refresh(db_attempt)
 
     return {
-        "id": f"attempt_{db_attempt.id}",
+        "id": f"att_{db_attempt.id}",
         "quiz_id": f"quiz_{quiz_numeric_id}",
+        "quiz_title": db_quiz.title,
         "score": correct_count,
         "total_questions": len(db_questions),
         "percentage": round(percentage, 2),
+        "duration_seconds": db_attempt.duration_seconds,
         "completed_at": db_attempt.completed_at,
         "questions": question_results,
     }
@@ -188,10 +238,14 @@ def get_attempt(
     db: Session = Depends(get_db),
 ):
     """
-    Get attempt results by ID.
+    Get attempt results by ID. Accepts both 'att_N' and legacy 'attempt_N'.
     """
     attempt_numeric_id = parse_prefixed_id(
-        attempt_id, ("attempt", "att"), status_code=404, detail="Attempt not found"
+        attempt_id,
+        ("att", "attempt"),
+        status_code=404,
+        detail="Attempt not found.",
+        code="ATTEMPT_NOT_FOUND",
     )
 
     db_attempt = (
@@ -201,13 +255,13 @@ def get_attempt(
         .first()
     )
     if not db_attempt:
-        raise HTTPException(status_code=404, detail="Attempt not found")
+        raise api_error(404, "ATTEMPT_NOT_FOUND", "Attempt not found.")
 
     ensure_owner_or_admin(db_attempt.user_id, current_user)
 
     db_quiz = db.query(Quiz).filter(Quiz.id == db_attempt.quiz_id).first()
     if not db_quiz:
-        raise HTTPException(status_code=404, detail="Quiz not found")
+        raise api_error(404, "QUIZ_NOT_FOUND", "Quiz not found.")
 
     # Eager-load all questions and their choices in one query (no N+1)
     question_ids = [ans.question_id for ans in db_attempt.answers]
@@ -247,6 +301,7 @@ def get_attempt(
                     db_question.choices, correct_choice.id
                 ),
                 "correct_choice_text": correct_choice.text,
+                "explanation": db_question.explanation,
                 "is_correct": db_answer.is_correct,
             }
         )
@@ -254,15 +309,17 @@ def get_attempt(
     percentage = (
         (db_attempt.score / db_attempt.total_questions * 100)
         if db_attempt.total_questions > 0
-        else 0
+        else 0.0
     )
 
     return {
-        "id": f"attempt_{db_attempt.id}",
+        "id": f"att_{db_attempt.id}",
         "quiz_id": f"quiz_{db_attempt.quiz_id}",
+        "quiz_title": db_quiz.title,
         "score": db_attempt.score,
         "total_questions": db_attempt.total_questions,
         "percentage": round(percentage, 2),
+        "duration_seconds": db_attempt.duration_seconds,
         "completed_at": db_attempt.completed_at,
         "questions": question_results,
     }

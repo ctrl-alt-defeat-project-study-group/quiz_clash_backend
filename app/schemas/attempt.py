@@ -1,9 +1,9 @@
 """
 Pydantic schemas for attempt-related data validation
 """
-from pydantic import BaseModel, Field
-from typing import List
 from datetime import datetime
+from typing import List, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # Answer submission schemas
@@ -13,6 +13,7 @@ class AnswerSubmission(BaseModel):
 
 
 class AttemptCreate(BaseModel):
+    duration_seconds: Optional[int] = Field(default=None, ge=0)
     answers: List[AnswerSubmission]
 
 
@@ -24,17 +25,33 @@ class QuestionResult(BaseModel):
     selected_choice_text: str
     correct_choice_id: str
     correct_choice_text: str
+    explanation: Optional[str] = None
     is_correct: bool
 
 
 class AttemptResponse(BaseModel):
-    id: str  # Will be like "attempt_456"
+    id: str  # "att_101"
     quiz_id: str
+    quiz_title: str
     score: int
     total_questions: int
     percentage: float
+    duration_seconds: Optional[int] = None
     completed_at: datetime
     questions: List[QuestionResult]
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AttemptSummaryResponse(BaseModel):
+    """Summary item for GET /api/v1/attempts"""
+    id: str
+    quiz_id: str
+    quiz_title: str
+    score: int
+    total_questions: int
+    percentage: float
+    duration_seconds: Optional[int] = None
+    completed_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

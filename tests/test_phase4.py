@@ -256,7 +256,7 @@ def test_ownership_enforcement_and_admin_access():
             files={"file": ("bio.csv", _sample_csv_bytes(), "text/csv")},
             data={"title": "User A Quiz", "question_count": "5"},
         )
-        assert q_resp.status_code == 200
+        assert q_resp.status_code == 201
         quiz_id = q_resp.json()["id"]
         first_qid = q_resp.json()["questions"][0]["id"]
 
@@ -264,7 +264,7 @@ def test_ownership_enforcement_and_admin_access():
             f"/api/v1/quizzes/{quiz_id}/attempts",
             json={"answers": [{"question_id": first_qid, "choice_id": "a"}]},
         )
-        assert att_resp.status_code == 200
+        assert att_resp.status_code == 201
         attempt_id = att_resp.json()["id"]
 
     # User B gets 403 FORBIDDEN on User A's quiz, export, and attempt
@@ -289,63 +289,63 @@ def test_admin_seeding_endpoints_and_last_admin_guard():
     ):
         seed_initial_admin()
 
-    user = _create_verified_user("member@example.com", role="user")
+        user = _create_verified_user("member@example.com", role="user")
 
-    # Non-admin blocked from /admin/*
-    with TestClient(app) as client_user:
-        client_user.cookies.set(settings.ACCESS_COOKIE_NAME, create_access_token(user.id, user.role))
-        assert client_user.get("/api/v1/admin/users").status_code == 403
-        assert client_user.get("/api/v1/admin/stats").status_code == 403
+        # Non-admin blocked from /admin/*
+        with TestClient(app) as client_user:
+            client_user.cookies.set(settings.ACCESS_COOKIE_NAME, create_access_token(user.id, user.role))
+            assert client_user.get("/api/v1/admin/users").status_code == 403
+            assert client_user.get("/api/v1/admin/stats").status_code == 403
 
-    with TestClient(app) as client_admin:
-        login_resp = client_admin.post(
-            "/api/v1/auth/login",
-            json={"email": "rootadmin@example.com", "password": "AdminPass123"},
-        )
-        assert login_resp.status_code == 200
-        admin_id = login_resp.json()["id"]
-
-        # Search users
-        users_resp = client_admin.get("/api/v1/admin/users", params={"q": "member"})
-        assert users_resp.status_code == 200
-        assert len(users_resp.json()) == 1
-        assert users_resp.json()[0]["email"] == "member@example.com"
-
-        # Cannot demote, deactivate, or delete last active admin
-        assert client_admin.patch(f"/api/v1/admin/users/{admin_id}", json={"role": "user"}).status_code == 400
-        assert client_admin.patch(f"/api/v1/admin/users/{admin_id}", json={"is_active": False}).status_code == 400
-        assert client_admin.delete(f"/api/v1/admin/users/{admin_id}").status_code == 400
-
-        # Deactivate regular user -> blocked from login with 403 ACCOUNT_DISABLED
-        deact = client_admin.patch(f"/api/v1/admin/users/{user.id}", json={"is_active": False})
-        assert deact.status_code == 200
-        assert deact.json()["is_active"] is False
-
-        with TestClient(app) as disabled_client:
-            r = disabled_client.post(
+        with TestClient(app) as client_admin:
+            login_resp = client_admin.post(
                 "/api/v1/auth/login",
-                json={"email": "member@example.com", "password": "Password123"},
+                json={"email": "rootadmin@example.com", "password": "AdminPass123"},
             )
-            assert r.status_code == 403
-            assert r.json()["detail"]["code"] == "ACCOUNT_DISABLED"
+            assert login_resp.status_code == 200
+            admin_id = login_resp.json()["id"]
 
-        # Promote user (and re-activate) -> now we have 2 admins so admin_id can be demoted
-        promo = client_admin.patch(
-            f"/api/v1/admin/users/{user.id}",
-            json={"role": "admin", "is_active": True},
-        )
-        assert promo.status_code == 200
-        assert promo.json()["role"] == "admin"
+            # Search users
+            users_resp = client_admin.get("/api/v1/admin/users", params={"q": "member"})
+            assert users_resp.status_code == 200
+            assert len(users_resp.json()) == 1
+            assert users_resp.json()[0]["email"] == "member@example.com"
 
-        # Admin stats & quizzes
-        stats = client_admin.get("/api/v1/admin/stats")
-        assert stats.status_code == 200
-        assert stats.json()["total_users"] == 2
-        assert stats.json()["admin_users"] == 2
+            # Cannot demote, deactivate, or delete last active admin
+            assert client_admin.patch(f"/api/v1/admin/users/{admin_id}", json={"role": "user"}).status_code == 400
+            assert client_admin.patch(f"/api/v1/admin/users/{admin_id}", json={"is_active": False}).status_code == 400
+            assert client_admin.delete(f"/api/v1/admin/users/{admin_id}").status_code == 400
 
-        quizzes_list = client_admin.get("/api/v1/admin/quizzes")
-        assert quizzes_list.status_code == 200
+            # Deactivate regular user -> blocked from login with 403 ACCOUNT_DISABLED
+            deact = client_admin.patch(f"/api/v1/admin/users/{user.id}", json={"is_active": False})
+            assert deact.status_code == 200
+            assert deact.json()["is_active"] is False
 
-        # Delete second user succeeds
-        del_u = client_admin.delete(f"/api/v1/admin/users/{user.id}")
-        assert del_u.status_code == 200
+            with TestClient(app) as disabled_client:
+                r = disabled_client.post(
+                    "/api/v1/auth/login",
+                    json={"email": "member@example.com", "password": "Password123"},
+                )
+                assert r.status_code == 403
+                assert r.json()["detail"]["code"] == "ACCOUNT_DISABLED"
+
+            # Promote user (and re-activate) -> now we have 2 admins so admin_id can be demoted
+            promo = client_admin.patch(
+                f"/api/v1/admin/users/{user.id}",
+                json={"role": "admin", "is_active": True},
+            )
+            assert promo.status_code == 200
+            assert promo.json()["role"] == "admin"
+
+            # Admin stats & quizzes
+            stats = client_admin.get("/api/v1/admin/stats")
+            assert stats.status_code == 200
+            assert stats.json()["total_users"] == 2
+            assert stats.json()["admin_users"] == 2
+
+            quizzes_list = client_admin.get("/api/v1/admin/quizzes")
+            assert quizzes_list.status_code == 200
+
+            # Delete second user succeeds
+            del_u = client_admin.delete(f"/api/v1/admin/users/{user.id}")
+            assert del_u.status_code == 200

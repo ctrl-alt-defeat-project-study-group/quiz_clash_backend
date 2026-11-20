@@ -51,48 +51,48 @@ Details of Phase 1 are in [phase1_boot_fix.md](phase1_boot_fix.md). Frontend ref
 - [x] Safety guard: prevent deleting or demoting the last active admin
 - [x] Auth error codes: `INVALID_CREDENTIALS`, `EMAIL_ALREADY_EXISTS`, `EMAIL_NOT_VERIFIED`, `TOKEN_INVALID_OR_EXPIRED`, `ACCOUNT_DISABLED`
 
-## Phase 5 – API contract core
-- [ ] `GET /api/v1/health` -> `{"status": "ok", "service": "quiz-clash-api"}`; update `tests/test_health.py`
-- [ ] `app/core/errors.py`: structured `{"detail": {"code": ..., "message": ...}}` helper + global handlers for `VALIDATION_ERROR` (`422`) and `SERVER_ERROR` (`500`)
-- [ ] Return contract error codes everywhere (`QUIZ_NOT_FOUND`, `ATTEMPT_NOT_FOUND`, `UNSUPPORTED_FILE_TYPE`, `FILE_TOO_LARGE` `413`, `EMPTY_FILE`, `GENERATION_FAILED`, `EXPORT_FAILED`)
-- [ ] Models + migration: `Quiz` (`category`, `source_filename`, `updated_at`, `status` default `"ready"`), `Question.explanation`, `Attempt.duration_seconds`
-- [ ] Standardize ID formats: `quiz_N`, `q_N`, `a`–`d`, `att_N` (accept legacy `attempt_N` on input if needed)
-- [ ] `POST /api/v1/quizzes`: return `201`, accept `category`, `question_count` in `{5, 10, 15, 20}`, save `source_filename`, generate `explanation` (`"{term}: {definition}"`)
-- [ ] `GET /api/v1/quizzes`: list user's quizzes (`id`, `title`, `category`, `source_filename`, `question_count`, `last_score`, `updated_at`)
-- [ ] `GET /api/v1/quizzes/{id}` hides `is_correct`; `GET /api/v1/quizzes/{id}/preview` includes `is_correct` and `explanation`
-- [ ] `PATCH /api/v1/quizzes/{id}`: full edit of `title`, `questions`, and `choices` (4 choices, 1 correct), update `updated_at`
-- [ ] `POST /api/v1/quizzes/{id}/attempts`: accept `duration_seconds`, return `201` with `id: att_N`, `quiz_title`, `explanation`
-- [ ] `GET /api/v1/attempts` (list) and `GET /api/v1/attempts/{id}` (detail with `explanation`)
-- [ ] Align `ApiQuizResponse` and `ApiAttemptResponse` schemas field-for-field with the contract
+## Phase 5 – API contract core (DONE)
+- [x] `GET /api/v1/health` -> `{"status": "ok", "service": "quiz-clash-api"}`; update `tests/test_health.py`
+- [x] `app/core/errors.py`: structured `{"detail": {"code": ..., "message": ...}}` helper + global handlers for `VALIDATION_ERROR` (`422`) and `SERVER_ERROR` (`500`)
+- [x] Return contract error codes everywhere (`QUIZ_NOT_FOUND`, `ATTEMPT_NOT_FOUND`, `UNSUPPORTED_FILE_TYPE`, `FILE_TOO_LARGE` `413`, `EMPTY_FILE`, `GENERATION_FAILED`, `EXPORT_FAILED`)
+- [x] Models + migration: `Quiz` (`category`, `source_filename`, `updated_at`, `status` default `"ready"`), `Question.explanation`, `Attempt.duration_seconds`
+- [x] Standardize ID formats: `quiz_N`, `q_N`, `a`–`d`, `att_N` (accept legacy `attempt_N` on input if needed)
+- [x] `POST /api/v1/quizzes`: return `201`, accept `category`, `question_count` in `{5, 10, 15, 20}`, save `source_filename`, generate `explanation` (`"{term}: {definition}"`)
+- [x] `GET /api/v1/quizzes`: list user's quizzes (`id`, `title`, `category`, `source_filename`, `question_count`, `last_score`, `updated_at`)
+- [x] `GET /api/v1/quizzes/{id}` hides `is_correct`; `GET /api/v1/quizzes/{id}/preview` includes `is_correct` and `explanation`
+- [x] `PATCH /api/v1/quizzes/{id}`: full edit of `title`, `questions`, and `choices` (4 choices, 1 correct), update `updated_at`
+- [x] `POST /api/v1/quizzes/{id}/attempts`: accept `duration_seconds`, return `201` with `id: att_N`, `quiz_title`, `explanation`
+- [x] `GET /api/v1/attempts` (list) and `GET /api/v1/attempts/{id}` (detail with `explanation`)
+- [x] Align `ApiQuizResponse` and `ApiAttemptResponse` schemas field-for-field with the contract
 
-## Phase 6 – Language (EN/MM), uploads & exports
-- [ ] Language helper: canonical code `mm` everywhere (`Accept-Language`, form `language`, query `lang`); silently accept `my` as an alias and normalize to `mm` (default `en`)
-- [ ] Parser: decode with `utf-8-sig` (BOM-safe); handle Myanmar separators (`။`, `၊`)
-- [ ] Upload support for `.pdf` (`pypdf`) and `.docx` (`python-docx`); update `ALLOWED_FILE_TYPES`; empty extracted text -> `400 EMPTY_FILE`
-- [ ] Quiz prompt template per language (`en` / `mm`)
-- [ ] Exports: support `lang` (`en|mm`) and `format` (`pdf|word`) query params
-- [ ] Word (`.docx`) export for both `questions` and `answers`
-- [ ] Bundle `Noto Sans Myanmar` Unicode font for PDF/DOCX; decide and implement Myanmar PDF shaping (WeasyPrint vs ReportLab)
-- [ ] Translate static export labels/headings by `lang`
+## Phase 6 – Language (EN/MM), uploads & exports (DONE)
+- [x] Language helper: canonical code `mm` everywhere (`Accept-Language`, form `language`, query `lang`); silently accept `my` as an alias and normalize to `mm` (default `en`)
+- [x] Parser: decode with `utf-8-sig` (BOM-safe); handle Myanmar separators (`။`, `၊`)
+- [x] Upload support for `.pdf` (`pypdf`) and `.docx` (`python-docx`); update `ALLOWED_FILE_TYPES`; empty extracted text -> `400 EMPTY_FILE`
+- [x] Quiz prompt template per language (`en` / `mm`)
+- [x] Exports: support `lang` (`en|mm`) and `format` (`pdf|word`) query params
+- [x] Word (`.docx`) export for both `questions` and `answers`
+- [x] Bundle `Noto Sans Myanmar` Unicode font for PDF/DOCX; decide and implement Myanmar PDF shaping (WeasyPrint vs ReportLab)
+- [x] Translate static export labels/headings by `lang`
 
-## Phase 7 – Live rooms
-- [ ] Models + migration: `LiveRoom` (`quiz_id`, `host_id`, `pin`, `timer_seconds`, `status`)
-- [ ] `POST /api/v1/live/rooms` (authenticated host only)
-- [ ] `POST /api/v1/live/rooms/{pin}/join` (guests allowed with `display_name`; `INVALID_ROOM_PIN` `400`, `ROOM_NOT_FOUND` `404`)
-- [ ] `POST /api/v1/live/rooms/{pin}/next` (host only)
-- [ ] `WS /api/v1/live/rooms/{pin}/ws` (server-timed rounds, answer submission, latency scoring, live leaderboard broadcast)
-- [ ] Room state payload matches `LiveGameState` in contract
+## Phase 7 – Live rooms (DONE)
+- [x] Models + migration: `LiveRoom` (`quiz_id`, `host_id`, `pin`, `timer_seconds`, `status`)
+- [x] `POST /api/v1/live/rooms` (authenticated host only)
+- [x] `POST /api/v1/live/rooms/{pin}/join` (guests allowed with `display_name`; `INVALID_ROOM_PIN` `400`, `ROOM_NOT_FOUND` `404`)
+- [x] `POST /api/v1/live/rooms/{pin}/next` (host only)
+- [x] `WS /api/v1/live/rooms/{pin}/ws` (server-timed rounds, answer submission, latency scoring, live leaderboard broadcast)
+- [x] Room state payload matches `LiveGameState` in contract
 
-## Phase 8 – Settings & account
-- [ ] `UserSettings` model + migration (theme, `ui_language`, `default_questions`, `difficulty`, `quiz_language`, `shuffle_questions`, `show_explanations`, `study_reminders`, `weekly_summary`)
-- [ ] `GET /api/v1/settings` and `PATCH /api/v1/settings`
-- [ ] `GET /api/v1/account/export` (JSON dump of user's quizzes, attempts, settings)
-- [ ] `DELETE /api/v1/account` (delete/reset user workspace data)
+## Phase 8 – Settings & account (DONE)
+- [x] `UserSettings` model + migration (theme, `ui_language`, `default_questions`, `difficulty`, `quiz_language`, `shuffle_questions`, `show_explanations`, `study_reminders`, `weekly_summary`)
+- [x] `GET /api/v1/settings` and `PATCH /api/v1/settings`
+- [x] `GET /api/v1/account/export` (JSON dump of user's quizzes, attempts, settings)
+- [x] `DELETE /api/v1/account` (delete/reset user workspace data)
 
-## Phase 9 – Hardening & tests
-- [ ] Automated test suite: auth flow, email verification/reset, CSRF, ownership, admin guards, contract response shapes, CSV/TXT/PDF/DOCX parsers, PDF/Word exports, live rooms
-- [ ] Bump Dockerfiles from Python 3.9 to 3.11+ and add `docker-compose.yml` (api + postgres)
-- [ ] Production safety checks (non-default `SECRET_KEY`, `COOKIE_SECURE=true`, rate limits)
+## Phase 9 – Hardening & tests (DONE)
+- [x] Automated test suite: auth flow, email verification/reset, CSRF, ownership, admin guards, contract response shapes, CSV/TXT/PDF/DOCX parsers, PDF/Word exports, live rooms
+- [x] Bump Dockerfiles from Python 3.9 to 3.11+ and add `docker-compose.yml` (api + postgres)
+- [x] Production safety checks (non-default `SECRET_KEY`, `COOKIE_SECURE=true`, rate limits)
 
 ## Deferred
 - AI quiz generation (`use_llm=true`): to be discussed later; return a clear error code until implemented.
