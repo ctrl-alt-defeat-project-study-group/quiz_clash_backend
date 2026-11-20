@@ -2,26 +2,52 @@
 Service for parsing and extracting content from uploaded files
 """
 import csv
-import re
-from typing import List, Tuple, Optional
-from fastapi import UploadFile, HTTPException
 import io
+from typing import List, Optional, Tuple
+from fastapi import UploadFile, HTTPException
+
+from app.core.config import settings
 
 
 class FileParser:
     """Parse uploaded files to extract structured content"""
-    
+
+    _SPACED_SEPARATORS = (": ", " - ", " – ", " — ", " -> ", " → ", " = ")
+    _COMPACT_SEPARATORS = (":", "=", "→", "-")
+
+    @staticmethod
+    def _parse_txt_line(line: str) -> Tuple[str, str]:
+        """Parse a single non-empty TXT line into a (term, definition) pair."""
+        # Prefer the earliest spaced separator so definitions containing other punctuation stay intact
+        best_sep = None
+        best_idx = len(line)
+        for sep in FileParser._SPACED_SEPARATORS:
+            idx = line.find(sep)
+            if idx != -1 and idx < best_idx:
+                best_idx = idx
+                best_sep = sep
+
+        if best_sep is not None:
+            term, definition = line.split(best_sep, 1)
+            return term.strip(), definition.strip()
+
+        for sep in FileParser._COMPACT_SEPARATORS:
+            if sep in line:
+                term, definition = line.split(sep, 1)
+                return term.strip(), definition.strip()
+
+        return line, ""
+
     @staticmethod
     def parse_csv(file: UploadFile) -> List[Tuple[str, str]]:
         """Parse CSV file expecting term,definition format"""
         try:
-            content = file.file.read().decode('utf-8')
+            content = file.file.read().decode("utf-8")
             file.file.seek(0)  # Reset file pointer
-            
-            # Parse CSV
+
             reader = csv.reader(io.StringIO(content))
-            terms_definitions = []
-            
+            terms_definitions: List[Tuple[str, str]] = []
+
             for row in reader:
                 if len(row) >= 2:
                     term = row[0].strip()
@@ -31,141 +57,113 @@ class FileParser:
                 elif len(row) == 1 and row[0].strip():
                     # Single column - treat as term only
                     terms_definitions.append((row[0].strip(), ""))
-            
+
             if not terms_definitions:
                 raise HTTPException(
                     status_code=400,
-                    detail="CSV file is empty or contains no valid term-definition pairs"
+                    detail="CSV file is empty or contains no valid term-definition pairs",
                 )
-            
+
             return terms_definitions
-            
+
+        except HTTPException:
+            raise
         except UnicodeDecodeError:
             raise HTTPException(
                 status_code=400,
-                detail="File encoding error. Please upload UTF-8 encoded files."
+                detail="File encoding error. Please upload UTF-8 encoded files.",
             )
         except Exception as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Error parsing CSV file: {str(e)}"
+                detail=f"Error parsing CSV file: {str(e)}",
             )
-    
+
     @staticmethod
     def parse_txt(file: UploadFile) -> List[Tuple[str, str]]:
-        """Parse TXT file with various formats"""
+        """Parse TXT file line by line across supported separator formats"""
         try:
-            content = file.file.read().decode('utf-8')
+            content = file.file.read().decode("utf-8")
             file.file.seek(0)  # Reset file pointer
-            
-            terms_definitions = []
-            
-            # Try to detect common formats
-            
-            # Format 1: term: definition
-            if ':' in content:
-                lines = content.split('\n')
-                for line in lines:
-                    if ':' in line:
-                        parts = line.split(':', 1)
-                        if len(parts) == 2:
-                            term = parts[0].strip()
-                            definition = parts[1].strip()
-                            if term:
-                                terms_definitions.append((term, definition))
-            
-            # Format 2: term - definition
-            elif '-' in content:
-                lines = content.split('\n')
-                for line in lines:
-                    if '-' in line:
-                        parts = line.split('-', 1)
-                        if len(parts) == 2:
-                            term = parts[0].strip()
-                            definition = parts[1].strip()
-                            if term:
-                                terms_definitions.append((term, definition))
-            
-            # Format 3: Simple list (one per line)
-            else:
-                lines = content.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line:
-                        # Try to split on any separator
-                        for sep in [' - ', ': ', ' = ', ' → ', ' -> ']:
-                            if sep in line:
-                                parts = line.split(sep, 1)
-                                if len(parts) == 2:
-                                    term = parts[0].strip()
-                                    definition = parts[1].strip()
-                                    if term:
-                                        terms_definitions.append((term, definition))
-                                    break
-                        else:
-                            # No separator found, treat as term only
-                            terms_definitions.append((line, ""))
-            
+
+            terms_definitions: List[Tuple[str, str]] = []
+
+            for raw_line in content.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                term, definition = FileParser._parse_txt_line(line)
+                if term:
+                    terms_definitions.append((term, definition))
+
             if not terms_definitions:
                 raise HTTPException(
                     status_code=400,
-                    detail="TXT file is empty or contains no parsable content. "
-                           "Expected format: term: definition or term - definition"
+                    detail=(
+                        "TXT file is empty or contains no parsable content. "
+                        "Expected format: term: definition or term - definition"
+                    ),
                 )
-            
+
             return terms_definitions
-            
+
+        except HTTPException:
+            raise
         except UnicodeDecodeError:
             raise HTTPException(
                 status_code=400,
-                detail="File encoding error. Please upload UTF-8 encoded files."
+                detail="File encoding error. Please upload UTF-8 encoded files.",
             )
         except Exception as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Error parsing TXT file: {str(e)}"
+                detail=f"Error parsing TXT file: {str(e)}",
             )
-    
+
     @staticmethod
     def parse_file(file: UploadFile) -> List[Tuple[str, str]]:
         """Parse file based on file extension"""
-        filename = file.filename.lower()
-        
-        if filename.endswith('.csv'):
+        filename = (file.filename or "").lower()
+
+        if filename.endswith(".csv"):
             return FileParser.parse_csv(file)
-        elif filename.endswith('.txt'):
+        if filename.endswith(".txt"):
             return FileParser.parse_txt(file)
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: {filename}. Only .csv and .txt files are supported."
-            )
-    
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {filename}. Only .csv and .txt files are supported.",
+        )
+
     @staticmethod
-    def validate_file(file: UploadFile, max_size_mb: int = 10) -> None:
+    def validate_file(file: UploadFile, max_size_mb: Optional[int] = None) -> None:
         """Validate uploaded file"""
+        limit_mb = settings.MAX_UPLOAD_SIZE_MB if max_size_mb is None else max_size_mb
+
         # Check file size
         file.file.seek(0, 2)  # Seek to end
         file_size = file.file.tell()
         file.file.seek(0)  # Reset to beginning
-        
-        max_size = max_size_mb * 1024 * 1024
+
+        max_size = limit_mb * 1024 * 1024
         if file_size > max_size:
             raise HTTPException(
                 status_code=400,
-                detail=f"File too large. Maximum size is {max_size_mb}MB"
+                detail=f"File too large. Maximum size is {limit_mb}MB",
             )
-        
+
         if file_size == 0:
             raise HTTPException(
                 status_code=400,
-                detail="File is empty"
+                detail="File is empty",
             )
-        
+
         # Check file extension
-        filename = file.filename.lower()
-        if not (filename.endswith('.csv') or filename.endswith('.txt')):
+        filename = (file.filename or "").lower()
+        allowed_extensions = tuple(ext.lower() for ext in settings.ALLOWED_FILE_TYPES)
+        if not filename.endswith(allowed_extensions):
+            allowed_str = ", ".join(settings.ALLOWED_FILE_TYPES)
             raise HTTPException(
                 status_code=400,
-                detail="Only .csv and .txt files are supported"
+                detail=f"Only {allowed_str} files are supported",
             )

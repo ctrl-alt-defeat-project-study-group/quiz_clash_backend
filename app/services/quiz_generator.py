@@ -9,186 +9,185 @@ from app.core.config import settings
 
 class QuizGenerator:
     """Generate multiple choice questions from terms and definitions"""
-    
+
     @staticmethod
     def generate_from_structured(
         terms_definitions: List[Tuple[str, str]],
-        question_count: Optional[int] = None
+        question_count: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Generate MCQs from structured term-definition pairs
-        
+        Generate MCQs from structured term-definition pairs.
+
         Args:
             terms_definitions: List of (term, definition) tuples
             question_count: Number of questions to generate (default: all or up to max)
-            
+
         Returns:
             List of question dictionaries with prompt and choices
         """
         if not terms_definitions:
             raise HTTPException(
                 status_code=400,
-                detail="No valid terms and definitions found"
+                detail="No valid terms and definitions found",
             )
-        
-        # Filter out entries with empty definitions
-        valid_pairs = [(t, d) for t, d in terms_definitions if d.strip()]
-        
+
+        if question_count is not None and question_count <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="question_count must be greater than 0",
+            )
+
+        # Filter empty entries and deduplicate pairs by normalized term
+        valid_pairs: List[Tuple[str, str]] = []
+        seen_terms = set()
+        for raw_term, raw_def in terms_definitions:
+            term = raw_term.strip()
+            definition = raw_def.strip()
+            if not term or not definition:
+                continue
+            term_key = term.casefold()
+            if term_key in seen_terms:
+                continue
+            seen_terms.add(term_key)
+            valid_pairs.append((term, definition))
+
         if len(valid_pairs) < settings.MIN_DEFINITIONS_FOR_GENERATION:
             raise HTTPException(
                 status_code=400,
-                detail=f"Need at least {settings.MIN_DEFINITIONS_FOR_GENERATION} "
-                       f"terms with definitions to generate questions. "
-                       f"Found only {len(valid_pairs)}."
+                detail=(
+                    f"Need at least {settings.MIN_DEFINITIONS_FOR_GENERATION} "
+                    f"unique terms with definitions to generate questions. "
+                    f"Found only {len(valid_pairs)}."
+                ),
             )
-        
+
+        # Build deduplicated definition pool (case-insensitive) for unique distractors
+        unique_definitions_by_key: Dict[str, str] = {}
+        for _, definition in valid_pairs:
+            def_key = definition.casefold()
+            if def_key not in unique_definitions_by_key:
+                unique_definitions_by_key[def_key] = definition
+
         # Determine how many questions to generate
         if question_count is None:
-            # Use all valid pairs, but cap at a reasonable number
-            question_count = min(len(valid_pairs), settings.DEFAULT_QUESTIONS_PER_QUIZ)
+            target_count = min(len(valid_pairs), settings.DEFAULT_QUESTIONS_PER_QUIZ)
         else:
-            question_count = min(question_count, len(valid_pairs))
-        
+            target_count = min(question_count, len(valid_pairs))
+
         # Shuffle pairs for random selection
-        random.shuffle(valid_pairs)
-        selected_pairs = valid_pairs[:question_count]
-        
-        questions = []
-        
-        for idx, (term, correct_definition) in enumerate(selected_pairs):
-            # Generate distractors from other definitions
-            all_definitions = [d for _, d in valid_pairs if d != correct_definition]
-            
-            if len(all_definitions) < 3:
+        shuffled_pairs = list(valid_pairs)
+        random.shuffle(shuffled_pairs)
+        selected_pairs = shuffled_pairs[:target_count]
+
+        questions: List[Dict[str, Any]] = []
+
+        for term, correct_definition in selected_pairs:
+            correct_key = correct_definition.casefold()
+            other_definitions = [
+                definition
+                for def_key, definition in unique_definitions_by_key.items()
+                if def_key != correct_key
+            ]
+
+            if len(other_definitions) < 3:
                 # Not enough unique definitions for distractors
                 continue
-            
-            # Select 3 unique distractors
-            distractors = random.sample(all_definitions, 3)
-            
-            # Create choices
-            choices = [
-                {"text": correct_definition, "is_correct": True, "position": 0}
-            ]
-            
-            for i, distractor in enumerate(distractors, 1):
-                choices.append({
-                    "text": distractor,
-                    "is_correct": False,
-                    "position": i
-                })
-            
-            # Shuffle choices (but keep track of correct position)
+
+            distractors = random.sample(other_definitions, 3)
+
+            choices = [{"text": correct_definition, "is_correct": True, "position": 0}]
+            for idx, distractor in enumerate(distractors, 1):
+                choices.append({"text": distractor, "is_correct": False, "position": idx})
+
             random.shuffle(choices)
-            
-            # Find correct choice position after shuffling
-            for i, choice in enumerate(choices):
-                if choice["is_correct"]:
-                    choice["position"] = i
-                else:
-                    choice["position"] = i
-            
-            # Create question
-            question = {
-                "prompt": f"What does '{term}' mean?",
-                "position": idx,
-                "choices": choices
-            }
-            
-            questions.append(question)
-        
+            for idx, choice in enumerate(choices):
+                choice["position"] = idx
+
+            questions.append(
+                {
+                    "prompt": f"What does '{term}' mean?",
+                    "position": len(questions),
+                    "choices": choices,
+                }
+            )
+
         return questions
-    
+
     @staticmethod
     def validate_questions(questions: List[Dict[str, Any]]) -> None:
         """Validate generated questions meet requirements"""
         if not questions:
             raise HTTPException(
                 status_code=400,
-                detail="No questions were generated"
+                detail="No questions were generated",
             )
-        
+
         for i, question in enumerate(questions):
-            # Check prompt
             if not question.get("prompt") or not isinstance(question["prompt"], str):
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Question {i+1}: Invalid or missing prompt"
+                    detail=f"Question {i+1}: Invalid or missing prompt",
                 )
-            
-            # Check choices
+
             choices = question.get("choices", [])
             if len(choices) != 4:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Question {i+1}: Must have exactly 4 choices, got {len(choices)}"
+                    detail=f"Question {i+1}: Must have exactly 4 choices, got {len(choices)}",
                 )
-            
-            # Check for exactly one correct choice
+
             correct_choices = [c for c in choices if c.get("is_correct")]
             if len(correct_choices) != 1:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Question {i+1}: Must have exactly one correct choice, got {len(correct_choices)}"
+                    detail=f"Question {i+1}: Must have exactly one correct choice, got {len(correct_choices)}",
                 )
-            
-            # Check for duplicate choice texts
+
             choice_texts = [c.get("text", "").strip() for c in choices]
             if len(set(choice_texts)) != len(choice_texts):
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Question {i+1}: Contains duplicate choice texts"
+                    detail=f"Question {i+1}: Contains duplicate choice texts",
                 )
-            
-            # Check choice texts are not empty
+
             for j, choice in enumerate(choices):
                 if not choice.get("text") or not isinstance(choice["text"], str):
                     raise HTTPException(
                         status_code=500,
-                        detail=f"Question {i+1}, Choice {j+1}: Invalid or missing text"
+                        detail=f"Question {i+1}, Choice {j+1}: Invalid or missing text",
                     )
-    
+
     @staticmethod
     def format_questions_for_response(
         questions: List[Dict[str, Any]],
-        include_correct: bool = False
+        include_correct: bool = False,
     ) -> List[Dict[str, Any]]:
-        """
-        Format questions for API response
-        
-        Args:
-            questions: Raw question data
-            include_correct: Whether to include is_correct field in response
-            
-        Returns:
-            Formatted questions with choice IDs (a, b, c, d)
-        """
+        """Format questions for API response"""
         formatted_questions = []
-        
+
         for q_idx, question in enumerate(questions):
             formatted_question = {
                 "id": f"q_{q_idx + 1}",
                 "prompt": question["prompt"],
                 "position": question.get("position", q_idx),
-                "choices": []
+                "choices": [],
             }
-            
-            # Sort choices by position
+
             sorted_choices = sorted(question["choices"], key=lambda c: c.get("position", 0))
-            
+
             for c_idx, choice in enumerate(sorted_choices):
                 choice_id = chr(97 + c_idx)  # 'a', 'b', 'c', 'd'
                 formatted_choice = {
                     "id": choice_id,
                     "text": choice["text"],
-                    "position": c_idx
+                    "position": c_idx,
                 }
-                
+
                 if include_correct:
                     formatted_choice["is_correct"] = choice.get("is_correct", False)
-                
+
                 formatted_question["choices"].append(formatted_choice)
-            
+
             formatted_questions.append(formatted_question)
-        
+
         return formatted_questions

@@ -23,6 +23,10 @@ class ChoiceResponse(ChoiceBase):
         from_attributes = True
 
 
+class ChoicePreviewResponse(ChoiceResponse):
+    is_correct: bool
+
+
 # Question schemas
 class QuestionBase(BaseModel):
     prompt: str
@@ -41,6 +45,14 @@ class QuestionResponse(QuestionBase):
         from_attributes = True
 
 
+class QuestionPreviewResponse(QuestionBase):
+    id: str
+    choices: List[ChoicePreviewResponse]
+
+    class Config:
+        from_attributes = True
+
+
 # Quiz schemas
 class QuizBase(BaseModel):
     title: str = Field(default="Untitled Quiz", max_length=255)
@@ -49,6 +61,12 @@ class QuizBase(BaseModel):
 class QuizCreate(QuizBase):
     source_type: str = Field(..., pattern="^(csv|txt|structured|llm)$")
     questions: List[QuestionCreate]
+
+
+class QuizUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=255)
+    source_type: Optional[str] = Field(default=None, pattern="^(csv|txt|structured|llm)$")
+    questions: Optional[List[QuestionCreate]] = None
 
 
 class QuizResponse(QuizBase):
@@ -64,7 +82,7 @@ class QuizResponse(QuizBase):
 
 class QuizPreviewResponse(QuizResponse):
     """Response for quiz preview/editing - includes correct answers"""
-    pass  # Same as QuizResponse, but will include correct answers in choices
+    questions: List[QuestionPreviewResponse]
 
 
 # File upload schemas

@@ -15,41 +15,41 @@ Details of Phase 1 are in [phase1_boot_fix.md](phase1_boot_fix.md). Frontend ref
 - [x] `models.py`: add `ForeignKey("choices.id")` on `AttemptAnswer.choice_id`
 - [x] Verify: import, mapper config, settings parsing, health tests (2 passed)
 
-## Phase 2 – Correctness fixes
-- [ ] **Grading IDs:** make `format_quiz_response` use `q_{db_id}` so quiz output and grading agree
-- [ ] **Attempts:** validate all answers before inserting; reject unknown/invalid/duplicate IDs (`400`/`422`); remove N+1 queries (eager loading)
-- [ ] **Exports:** clean up temp PDF with `BackgroundTask` (stop deleting before streaming); sanitize download filename
-- [ ] **PDF:** escape user text in `Paragraph`; load `.ttc` fonts with `subfontIndex`; apply Unicode font to table cells
-- [ ] **Parser:** re-raise `HTTPException` instead of wrapping it; enforce `settings.MAX_UPLOAD_SIZE_MB`; parse TXT line by line
-- [ ] **Generator:** dedupe pairs, pick unique distractors, renumber question positions after skipped items
-- [ ] **Quiz POST:** run duplicate detection before generation; honor new `title` and `question_count`
-- [ ] **Shared helper:** single `parse_prefixed_id()` in `app/core/ids.py` instead of 3 copies
-- [ ] **Sync handlers:** switch blocking DB handlers from `async def` to `def`
+## Phase 2 – Correctness fixes (DONE)
+- [x] **Grading IDs:** make `format_quiz_response` use `q_{db_id}` so quiz output and grading agree
+- [x] **Attempts:** validate all answers before inserting; reject unknown/invalid/duplicate IDs (`400`/`422`); remove N+1 queries (eager loading)
+- [x] **Exports:** clean up temp PDF with `BackgroundTask` (stop deleting before streaming); sanitize download filename
+- [x] **PDF:** escape user text in `Paragraph`; load `.ttc` fonts with `subfontIndex`; apply Unicode font to table cells
+- [x] **Parser:** re-raise `HTTPException` instead of wrapping it; enforce `settings.MAX_UPLOAD_SIZE_MB`; parse TXT line by line
+- [x] **Generator:** dedupe pairs, pick unique distractors, renumber question positions after skipped items
+- [x] **Quiz POST:** run duplicate detection before generation; honor new `title` and `question_count`
+- [x] **Shared helper:** single `parse_prefixed_id()` in `app/core/ids.py` instead of 3 copies
+- [x] **Sync handlers:** switch blocking DB handlers from `async def` to `def`
 
-## Phase 3 – Migrations & project base
-- [ ] Add `__init__.py` files and `tests/conftest.py` (fixes `find_packages()` and running `pytest` without `PYTHONPATH=.`)
-- [ ] Initialize Alembic with an initial migration; remove `Base.metadata.create_all()` from startup
-- [ ] Add `ForeignKey("questions.id")` on `AttemptAnswer.question_id`, `ondelete="CASCADE"` on FKs, and indexes on `quiz_id` and `source_hash`
+## Phase 3 – Migrations & project base (DONE)
+- [x] Add `__init__.py` files and `tests/conftest.py` (fixes `find_packages()` and running `pytest` without `PYTHONPATH=.`)
+- [x] Initialize Alembic with an initial migration; remove `Base.metadata.create_all()` from startup
+- [x] Add `ForeignKey("questions.id")` on `AttemptAnswer.question_id`, `ondelete="CASCADE"` on FKs, and indexes on `quiz_id` and `source_hash`
 
-## Phase 4 – Auth, roles, email verification & admin
-- [ ] Dependencies: add `argon2-cffi`, `PyJWT`, `email-validator`
-- [ ] Settings: `SECRET_KEY`, cookie flags (`COOKIE_SECURE`, `COOKIE_SAMESITE`), token lifetimes, `ADMIN_EMAIL`/`ADMIN_PASSWORD`, `SMTP_*` (optional), `APP_BASE_URL`
-- [ ] Models + migration: `User` (`display_name`, `role` `user|admin`, `is_active`, `email_verified_at`), `EmailToken` (`user_id`, `purpose` `verify|reset`, `token_hash`, `expires_at`, `used_at`), `Quiz.owner_id`, `Attempt.user_id`
-- [ ] Password hashing with Argon2 and password strength rules
-- [ ] Mailer service: console backend in dev (prints clickable link when SMTP is not configured) + SMTP backend for production
-- [ ] `POST /api/v1/auth/register` (open sign-up, always creates `user`, sends verification email)
-- [ ] `POST /api/v1/auth/verify-email` and `POST /api/v1/auth/resend-verification`
-- [ ] `POST /api/v1/auth/login` (sets httpOnly access + refresh cookies; blocks unverified users with `403 EMAIL_NOT_VERIFIED`; `401 INVALID_CREDENTIALS`; `403 ACCOUNT_DISABLED`)
-- [ ] `POST /api/v1/auth/logout`, `POST /api/v1/auth/refresh`, `GET /api/v1/auth/me`
-- [ ] `POST /api/v1/auth/forgot-password` and `POST /api/v1/auth/reset-password` (one-time expiring token)
-- [ ] Auth dependencies: `get_current_user` (`401`), `require_admin` (`403`), `get_optional_user` (for guest-capable live routes)
-- [ ] CSRF guard: verify `Origin` header against `FRONTEND_ORIGINS` on `POST`/`PATCH`/`DELETE`; cookies `HttpOnly`, `SameSite=Lax`, `Secure` in prod
-- [ ] Rate limiting on login, register, and forgot-password (`429 RATE_LIMITED`)
-- [ ] Seed first admin user on startup from `ADMIN_EMAIL`/`ADMIN_PASSWORD`
-- [ ] Ownership enforcement: users only read/edit/delete their own quizzes and attempts; admins can access all; guests cannot play solo or create quizzes
-- [ ] Admin API: `GET /api/v1/admin/users` (with search), `PATCH /api/v1/admin/users/{id}` (`role`, `is_active`), `DELETE /api/v1/admin/users/{id}`, `GET /api/v1/admin/quizzes`, `DELETE /api/v1/admin/quizzes/{id}`, `GET /api/v1/admin/stats`
-- [ ] Safety guard: prevent deleting or demoting the last active admin
-- [ ] Auth error codes: `INVALID_CREDENTIALS`, `EMAIL_ALREADY_EXISTS`, `EMAIL_NOT_VERIFIED`, `TOKEN_INVALID_OR_EXPIRED`, `ACCOUNT_DISABLED`
+## Phase 4 – Auth, roles, email verification & admin (DONE)
+- [x] Dependencies: add `argon2-cffi`, `PyJWT`, `email-validator`
+- [x] Settings: `SECRET_KEY`, cookie flags (`COOKIE_SECURE`, `COOKIE_SAMESITE`), token lifetimes, `ADMIN_EMAIL`/`ADMIN_PASSWORD`, `SMTP_*` (optional), `APP_BASE_URL`
+- [x] Models + migration: `User` (`display_name`, `role` `user|admin`, `is_active`, `email_verified_at`), `EmailToken` (`user_id`, `purpose` `verify|reset`, `token_hash`, `expires_at`, `used_at`), `Quiz.owner_id`, `Attempt.user_id`
+- [x] Password hashing with Argon2 and password strength rules
+- [x] Mailer service: console backend in dev (prints clickable link when SMTP is not configured) + SMTP backend for production
+- [x] `POST /api/v1/auth/register` (open sign-up, always creates `user`, sends verification email)
+- [x] `POST /api/v1/auth/verify-email` and `POST /api/v1/auth/resend-verification`
+- [x] `POST /api/v1/auth/login` (sets httpOnly access + refresh cookies; blocks unverified users with `403 EMAIL_NOT_VERIFIED`; `401 INVALID_CREDENTIALS`; `403 ACCOUNT_DISABLED`)
+- [x] `POST /api/v1/auth/logout`, `POST /api/v1/auth/refresh`, `GET /api/v1/auth/me`
+- [x] `POST /api/v1/auth/forgot-password` and `POST /api/v1/auth/reset-password` (one-time expiring token)
+- [x] Auth dependencies: `get_current_user` (`401`), `require_admin` (`403`), `get_optional_user` (for guest-capable live routes)
+- [x] CSRF guard: verify `Origin` header against `FRONTEND_ORIGINS` on `POST`/`PATCH`/`DELETE`; cookies `HttpOnly`, `SameSite=Lax`, `Secure` in prod
+- [x] Rate limiting on login, register, and forgot-password (`429 RATE_LIMITED`)
+- [x] Seed first admin user on startup from `ADMIN_EMAIL`/`ADMIN_PASSWORD`
+- [x] Ownership enforcement: users only read/edit/delete their own quizzes and attempts; admins can access all; guests cannot play solo or create quizzes
+- [x] Admin API: `GET /api/v1/admin/users` (with search), `PATCH /api/v1/admin/users/{id}` (`role`, `is_active`), `DELETE /api/v1/admin/users/{id}`, `GET /api/v1/admin/quizzes`, `DELETE /api/v1/admin/quizzes/{id}`, `GET /api/v1/admin/stats`
+- [x] Safety guard: prevent deleting or demoting the last active admin
+- [x] Auth error codes: `INVALID_CREDENTIALS`, `EMAIL_ALREADY_EXISTS`, `EMAIL_NOT_VERIFIED`, `TOKEN_INVALID_OR_EXPIRED`, `ACCOUNT_DISABLED`
 
 ## Phase 5 – API contract core
 - [ ] `GET /api/v1/health` -> `{"status": "ok", "service": "quiz-clash-api"}`; update `tests/test_health.py`

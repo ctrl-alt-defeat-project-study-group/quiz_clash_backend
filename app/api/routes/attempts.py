@@ -1,174 +1,175 @@
 """
 API routes for quiz attempts
 """
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
+from app.core.deps import ensure_owner_or_admin, get_current_user
+from app.core.ids import parse_prefixed_id
 from app.db.session import get_db
-from app.db.models import Quiz, Question, Choice, Attempt, AttemptAnswer
+from app.db.models import Quiz, Question, Choice, Attempt, AttemptAnswer, User
 from app.schemas.attempt import AttemptCreate, AttemptResponse
 
 router = APIRouter()
 
 
-def parse_quiz_id(quiz_id_str: str) -> int:
-    """Parse numeric quiz ID from string format"""
-    try:
-        if '_' in quiz_id_str:
-            return int(quiz_id_str.split('_')[-1])
-        return int(quiz_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid quiz ID format")
-
-
-def parse_question_id(question_id_str: str) -> int:
-    """Parse numeric question ID from string format"""
-    try:
-        if '_' in question_id_str:
-            return int(question_id_str.split('_')[-1])
-        return int(question_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid question ID format")
-
-
-def get_choice_mapping(questions: List[Question]) -> Dict[str, Dict[str, int]]:
+def get_choice_mapping(questions: List[Question]) -> Dict[str, Dict[str, Choice]]:
     """
-    Create mapping from API choice IDs (a, b, c, d) to database choice IDs
-    
-    Returns: {question_id: {choice_letter: db_choice_id}}
+    Create mapping from API choice IDs (a, b, c, d) to Choice ORM instances.
+
+    Returns: {f"q_{question.id}": {choice_letter: Choice}}
     """
-    choice_mapping = {}
-    
+    choice_mapping: Dict[str, Dict[str, Choice]] = {}
+
     for question in questions:
-        # Sort choices by position
         sorted_choices = sorted(question.choices, key=lambda c: c.position)
-        question_mapping = {}
-        
+        question_mapping: Dict[str, Choice] = {}
+
         for idx, choice in enumerate(sorted_choices):
             choice_letter = chr(97 + idx)  # 'a', 'b', 'c', 'd'
-            question_mapping[choice_letter] = choice.id
-        
-        # Use string format for question ID in mapping
-        question_key = f"q_{question.id}"
-        choice_mapping[question_key] = question_mapping
-    
+            question_mapping[choice_letter] = choice
+
+        choice_mapping[f"q_{question.id}"] = question_mapping
+
     return choice_mapping
 
 
 @router.post("/quizzes/{quiz_id}/attempts", response_model=AttemptResponse)
-async def submit_attempt(
+def submit_attempt(
     quiz_id: str,
     attempt_data: AttemptCreate,
-    db: Session = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
-    Submit answers for a quiz and get graded results
-    
+    Submit answers for a quiz and get graded results.
+
+    - Validates all answers before writing to the database
     - Calculates score on server
     - Stores attempt in database
     - Returns detailed results
     """
-    # Parse quiz ID
-    quiz_numeric_id = parse_quiz_id(quiz_id)
-    
-    # Get quiz with questions and choices
-    db_quiz = db.query(Quiz).filter(Quiz.id == quiz_numeric_id).first()
+    quiz_numeric_id = parse_prefixed_id(
+        quiz_id, "quiz", status_code=400, detail="Invalid quiz ID format"
+    )
+
+    db_quiz = (
+        db.query(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(Question.choices))
+        .filter(Quiz.id == quiz_numeric_id)
+        .first()
+    )
     if not db_quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
-    
-    # Get all questions for this quiz
-    db_questions = db.query(Question).filter(Question.quiz_id == quiz_numeric_id).all()
+
+    ensure_owner_or_admin(db_quiz.owner_id, current_user)
+
+    db_questions = sorted(db_quiz.questions, key=lambda q: q.position)
     if not db_questions:
         raise HTTPException(status_code=400, detail="Quiz has no questions")
-    
-    # Create choice mapping
+
     choice_mapping = get_choice_mapping(db_questions)
-    
-    # Create database attempt
+    question_map = {f"q_{q.id}": q for q in db_questions}
+
+    # Validate every submitted answer before inserting anything
+    validated_entries: List[Tuple[Question, Choice, Choice, str]] = []
+    seen_question_ids = set()
+
+    for answer in attempt_data.answers:
+        # Ensure question_id has valid prefixed/numeric format
+        q_numeric_id = parse_prefixed_id(
+            answer.question_id,
+            "q",
+            status_code=400,
+            detail=f"Invalid question ID format: {answer.question_id}",
+        )
+        normalized_qid = f"q_{q_numeric_id}"
+
+        if normalized_qid in seen_question_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate answer for question: {normalized_qid}",
+            )
+        seen_question_ids.add(normalized_qid)
+
+        db_question = question_map.get(normalized_qid)
+        if not db_question:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown question ID for this quiz: {answer.question_id}",
+            )
+
+        correct_choice = next((c for c in db_question.choices if c.is_correct), None)
+        if not correct_choice:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Question {normalized_qid} has no correct choice configured",
+            )
+
+        selected_choice_letter = answer.choice_id.strip().lower()
+        selected_choice = choice_mapping.get(normalized_qid, {}).get(
+            selected_choice_letter
+        )
+        if not selected_choice:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid choice ID '{answer.choice_id}' "
+                    f"for question '{normalized_qid}'"
+                ),
+            )
+
+        validated_entries.append(
+            (db_question, selected_choice, correct_choice, selected_choice_letter)
+        )
+
+    # All answers validated; now persist Attempt and AttemptAnswer rows
     db_attempt = Attempt(
         quiz_id=quiz_numeric_id,
+        user_id=current_user.id,
         score=0,
-        total_questions=len(db_questions)
+        total_questions=len(db_questions),
     )
     db.add(db_attempt)
-    db.flush()  # Get attempt ID
-    
-    # Process each answer
+    db.flush()
+
     correct_count = 0
     question_results = []
-    
-    # Create a mapping from question string ID to database question
-    question_map = {f"q_{q.id}": q for q in db_questions}
-    
-    for answer in attempt_data.answers:
-        # Get question from mapping
-        db_question = question_map.get(answer.question_id)
-        if not db_question:
-            # Question not found in this quiz
-            continue
-        
-        # Get correct choice for this question
-        correct_choice = None
-        for choice in db_question.choices:
-            if choice.is_correct:
-                correct_choice = choice
-                break
-        
-        if not correct_choice:
-            # No correct choice defined (shouldn't happen with validation)
-            continue
-        
-        # Get selected choice ID from mapping
-        question_choice_map = choice_mapping.get(answer.question_id, {})
-        selected_db_choice_id = question_choice_map.get(answer.choice_id)
-        
-        if not selected_db_choice_id:
-            # Invalid choice letter
-            continue
-        
-        # Get selected choice from database
-        selected_choice = db.query(Choice).filter(Choice.id == selected_db_choice_id).first()
-        if not selected_choice:
-            continue
-        
-        # Check if answer is correct
-        is_correct = (selected_choice.id == correct_choice.id)
-        
+
+    for db_question, selected_choice, correct_choice, selected_letter in validated_entries:
+        is_correct = selected_choice.id == correct_choice.id
         if is_correct:
             correct_count += 1
-        
-        # Create attempt answer record
+
         db_attempt_answer = AttemptAnswer(
             attempt_id=db_attempt.id,
             question_id=db_question.id,
             choice_id=selected_choice.id,
-            is_correct=is_correct
+            is_correct=is_correct,
         )
         db.add(db_attempt_answer)
-        
-        # Prepare result for response
-        question_result = {
-            "question_id": answer.question_id,
-            "question_prompt": db_question.prompt,
-            "selected_choice_id": answer.choice_id,
-            "selected_choice_text": selected_choice.text,
-            "correct_choice_id": get_choice_letter(db_question.choices, correct_choice.id),
-            "correct_choice_text": correct_choice.text,
-            "is_correct": is_correct
-        }
-        question_results.append(question_result)
-    
-    # Update attempt score
+
+        question_results.append(
+            {
+                "question_id": f"q_{db_question.id}",
+                "question_prompt": db_question.prompt,
+                "selected_choice_id": selected_letter,
+                "selected_choice_text": selected_choice.text,
+                "correct_choice_id": get_choice_letter(
+                    db_question.choices, correct_choice.id
+                ),
+                "correct_choice_text": correct_choice.text,
+                "is_correct": is_correct,
+            }
+        )
+
     db_attempt.score = correct_count
-    
-    # Calculate percentage
     percentage = (correct_count / len(db_questions) * 100) if db_questions else 0
-    
+
     db.commit()
     db.refresh(db_attempt)
-    
-    # Return response
+
     return {
         "id": f"attempt_{db_attempt.id}",
         "quiz_id": f"quiz_{quiz_numeric_id}",
@@ -176,80 +177,86 @@ async def submit_attempt(
         "total_questions": len(db_questions),
         "percentage": round(percentage, 2),
         "completed_at": db_attempt.completed_at,
-        "questions": question_results
+        "questions": question_results,
     }
 
 
 @router.get("/attempts/{attempt_id}", response_model=AttemptResponse)
-async def get_attempt(
+def get_attempt(
     attempt_id: str,
-    db: Session = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
-    Get attempt results by ID
+    Get attempt results by ID.
     """
-    # Parse attempt ID
-    try:
-        if '_' in attempt_id:
-            attempt_numeric_id = int(attempt_id.split('_')[-1])
-        else:
-            attempt_numeric_id = int(attempt_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Attempt not found")
-    
-    # Get attempt with answers
-    db_attempt = db.query(Attempt).filter(Attempt.id == attempt_numeric_id).first()
+    attempt_numeric_id = parse_prefixed_id(
+        attempt_id, ("attempt", "att"), status_code=404, detail="Attempt not found"
+    )
+
+    db_attempt = (
+        db.query(Attempt)
+        .options(selectinload(Attempt.answers).selectinload(AttemptAnswer.choice))
+        .filter(Attempt.id == attempt_numeric_id)
+        .first()
+    )
     if not db_attempt:
         raise HTTPException(status_code=404, detail="Attempt not found")
-    
-    # Get quiz
+
+    ensure_owner_or_admin(db_attempt.user_id, current_user)
+
     db_quiz = db.query(Quiz).filter(Quiz.id == db_attempt.quiz_id).first()
     if not db_quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
-    
-    # Get all attempt answers with related data
-    db_answers = db.query(AttemptAnswer).filter(
-        AttemptAnswer.attempt_id == attempt_numeric_id
-    ).all()
-    
+
+    # Eager-load all questions and their choices in one query (no N+1)
+    question_ids = [ans.question_id for ans in db_attempt.answers]
+    questions_by_id: Dict[int, Question] = {}
+    if question_ids:
+        db_questions = (
+            db.query(Question)
+            .options(selectinload(Question.choices))
+            .filter(Question.id.in_(question_ids))
+            .all()
+        )
+        questions_by_id = {q.id: q for q in db_questions}
+
     question_results = []
-    
-    for db_answer in db_answers:
-        # Get question
-        db_question = db.query(Question).filter(Question.id == db_answer.question_id).first()
+    for db_answer in db_attempt.answers:
+        db_question = questions_by_id.get(db_answer.question_id)
         if not db_question:
             continue
-        
-        # Get selected choice
-        selected_choice = db.query(Choice).filter(Choice.id == db_answer.choice_id).first()
+
+        selected_choice = db_answer.choice
         if not selected_choice:
             continue
-        
-        # Get correct choice for this question
-        correct_choice = None
-        for choice in db_question.choices:
-            if choice.is_correct:
-                correct_choice = choice
-                break
-        
+
+        correct_choice = next((c for c in db_question.choices if c.is_correct), None)
         if not correct_choice:
             continue
-        
-        # Prepare result
-        question_result = {
-            "question_id": f"q_{db_question.id}",
-            "question_prompt": db_question.prompt,
-            "selected_choice_id": get_choice_letter(db_question.choices, selected_choice.id),
-            "selected_choice_text": selected_choice.text,
-            "correct_choice_id": get_choice_letter(db_question.choices, correct_choice.id),
-            "correct_choice_text": correct_choice.text,
-            "is_correct": db_answer.is_correct
-        }
-        question_results.append(question_result)
-    
-    # Calculate percentage
-    percentage = (db_attempt.score / db_attempt.total_questions * 100) if db_attempt.total_questions > 0 else 0
-    
+
+        question_results.append(
+            {
+                "question_id": f"q_{db_question.id}",
+                "question_prompt": db_question.prompt,
+                "selected_choice_id": get_choice_letter(
+                    db_question.choices, selected_choice.id
+                ),
+                "selected_choice_text": selected_choice.text,
+                "correct_choice_id": get_choice_letter(
+                    db_question.choices, correct_choice.id
+                ),
+                "correct_choice_text": correct_choice.text,
+                "is_correct": db_answer.is_correct,
+            }
+        )
+
+    percentage = (
+        (db_attempt.score / db_attempt.total_questions * 100)
+        if db_attempt.total_questions > 0
+        else 0
+    )
+
     return {
         "id": f"attempt_{db_attempt.id}",
         "quiz_id": f"quiz_{db_attempt.quiz_id}",
@@ -257,17 +264,16 @@ async def get_attempt(
         "total_questions": db_attempt.total_questions,
         "percentage": round(percentage, 2),
         "completed_at": db_attempt.completed_at,
-        "questions": question_results
+        "questions": question_results,
     }
 
 
 def get_choice_letter(choices: List[Choice], target_choice_id: int) -> str:
     """Get choice letter (a, b, c, d) from database choice ID"""
-    # Sort choices by position
     sorted_choices = sorted(choices, key=lambda c: c.position)
-    
+
     for idx, choice in enumerate(sorted_choices):
         if choice.id == target_choice_id:
             return chr(97 + idx)  # 'a', 'b', 'c', 'd'
-    
-    return "?"  # Should not happen with valid data
+
+    return "?"
