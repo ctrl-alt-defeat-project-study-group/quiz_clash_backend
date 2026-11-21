@@ -20,6 +20,10 @@ if "DATABASE_URL" not in os.environ:
     _db_path = Path(_temp_db_dir.name) / "test.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 
+# Keep local .env demo-user seed out of automated test runs unless explicitly patched
+os.environ.setdefault("DEMO_USER_EMAIL", "")
+os.environ.setdefault("DEMO_USER_PASSWORD", "")
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _cleanup_test_db():

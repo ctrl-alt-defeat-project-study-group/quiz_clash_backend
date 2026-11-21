@@ -94,8 +94,10 @@ Details of Phase 1 are in [phase1_boot_fix.md](phase1_boot_fix.md). Frontend ref
 - [x] Bump Dockerfiles from Python 3.9 to 3.11+ and add `docker-compose.yml` (api + postgres)
 - [x] Production safety checks (non-default `SECRET_KEY`, `COOKIE_SECURE=true`, rate limits)
 
-## Deferred
-- AI quiz generation (`use_llm=true`): to be discussed later; return a clear error code until implemented.
+## Phase 10 – AI Quiz Generation (DONE)
+- [x] `FileParser.extract_raw_text` for unstructured `.csv`, `.txt`, `.pdf`, `.docx` uploads
+- [x] `LLMQuizGenerator` (Gemini 2.5 Flash): Stage 1 document summary + keyword extraction → Stage 2 native Google Search grounding on keywords (with graceful fallback) → Stage 3 strict JSON MCQ generation (EN/MM) + validation retry
+- [x] `POST /api/v1/quizzes` wired for `use_llm=true` and `use_web_search` (default `true`), with duplicate caching and per-user LLM rate limiting
 
 ## Frontend handoff (not edited in this repo)
 - [ ] Send `credentials: "include"` on all `fetch` calls; handle `401` (redirect to login) and `403`

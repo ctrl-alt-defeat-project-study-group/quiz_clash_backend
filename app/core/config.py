@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     # CORS
     FRONTEND_ORIGINS: Union[List[str], str] = [
         "http://localhost:5173",  # Vite default
+        "http://127.0.0.1:5173",  # Vite loopback IP
         "http://localhost:3000",  # Create React App default
+        "http://127.0.0.1:3000",  # CRA loopback IP
     ]
 
     @field_validator("FRONTEND_ORIGINS", mode="before")
@@ -51,6 +53,11 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: Optional[str] = None
     ADMIN_DISPLAY_NAME: str = "Admin"
 
+    # Initial regular user seed (optional)
+    DEMO_USER_EMAIL: Optional[str] = None
+    DEMO_USER_PASSWORD: Optional[str] = None
+    DEMO_USER_DISPLAY_NAME: str = "Demo User"
+
     # Optional SMTP settings (console mailer used when SMTP_HOST is unset)
     SMTP_HOST: Optional[str] = None
     SMTP_PORT: int = 587
@@ -63,6 +70,10 @@ class Settings(BaseSettings):
     RATE_LIMIT_AUTH_MAX_REQUESTS: int = 10
     RATE_LIMIT_AUTH_WINDOW_SECONDS: int = 60
 
+    # Rate limiting for LLM quiz generation (per user)
+    RATE_LIMIT_LLM_MAX_REQUESTS: int = 5
+    RATE_LIMIT_LLM_WINDOW_SECONDS: int = 60
+
     # File upload settings
     MAX_UPLOAD_SIZE_MB: int = 10
     ALLOWED_FILE_TYPES: List[str] = [".csv", ".txt", ".pdf", ".docx"]
@@ -71,10 +82,15 @@ class Settings(BaseSettings):
     DEFAULT_QUESTIONS_PER_QUIZ: int = 10
     MIN_DEFINITIONS_FOR_GENERATION: int = 8
 
-    # LLM Settings (optional)
+    # LLM Settings (Gemini API)
     LLM_API_KEY: Optional[str] = None
-    LLM_MODEL: str = "gpt-3.5-turbo"
-    LLM_MAX_TOKENS: int = 500
+    LLM_MODEL: str = "gemini-3.5-flash-lite"
+    LLM_API_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
+    LLM_MAX_TOKENS: int = 4096
+    LLM_TIMEOUT_SECONDS: int = 30
+    LLM_WEB_SEARCH_TIMEOUT_SECONDS: int = 15
+    LLM_MAX_INPUT_CHARS: int = 20000
+    LLM_MAX_KEYWORDS: int = 6
 
     # PDF Generation
     PDF_FONT_NAME: str = "Helvetica"

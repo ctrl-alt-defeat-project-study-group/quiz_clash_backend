@@ -29,7 +29,11 @@ class CSRFOriginMiddleware(BaseHTTPMiddleware):
         if request.method.upper() in _UNSAFE_METHODS:
             origin = request.headers.get("origin")
             referer = request.headers.get("referer")
-            allowed = set(settings.FRONTEND_ORIGINS)
+            allowed = {o.rstrip("/") for o in settings.FRONTEND_ORIGINS}
+            # Allow same-origin requests (e.g. Swagger UI /docs calling the API on its own host)
+            self_origin = _extract_origin(str(request.url))
+            if self_origin:
+                allowed.add(self_origin)
 
             if origin is not None:
                 if origin.rstrip("/") not in allowed:

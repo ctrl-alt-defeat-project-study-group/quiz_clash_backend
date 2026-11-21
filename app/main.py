@@ -22,7 +22,7 @@ from app.api.routes import (
     quizzes,
     settings as settings_routes,
 )
-from app.services.bootstrap import seed_initial_admin
+from app.services.bootstrap import seed_initial_admin, seed_initial_user
 
 
 @asynccontextmanager
@@ -30,6 +30,7 @@ async def lifespan(app: FastAPI):
     # Fail fast on unsafe production settings; schema is managed by Alembic migrations
     validate_production_settings(settings)
     seed_initial_admin()
+    seed_initial_user()
     yield
 
 
@@ -41,7 +42,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configure CORS
+# CSRF protection for state-changing requests (added before CORS so CORS wraps it)
+app.add_middleware(CSRFOriginMiddleware)
+
+# Configure CORS (outermost middleware so error responses still include CORS headers)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.FRONTEND_ORIGINS,
@@ -49,9 +53,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# CSRF protection for state-changing requests
-app.add_middleware(CSRFOriginMiddleware)
 
 # Register global exception handlers
 app.add_exception_handler(RequestValidationError, validation_exception_handler)

@@ -232,6 +232,100 @@ class FileParser:
             )
 
     @staticmethod
+    def extract_raw_text(file: UploadFile) -> str:
+        """Extract raw plain text from CSV, TXT, PDF, or DOCX without requiring term:definition pairs."""
+        filename = (file.filename or "").lower()
+
+        if filename.endswith((".csv", ".txt")):
+            try:
+                text = file.file.read().decode("utf-8-sig").strip()
+            except UnicodeDecodeError:
+                raise api_error(
+                    400,
+                    "VALIDATION_ERROR",
+                    "File encoding error. Please upload UTF-8 encoded files.",
+                )
+            finally:
+                file.file.seek(0)
+
+            if not text:
+                raise api_error(
+                    400,
+                    "EMPTY_FILE",
+                    "File is empty or contains no readable study text.",
+                )
+            return text
+
+        if filename.endswith(".pdf"):
+            from pypdf import PdfReader
+
+            try:
+                raw_bytes = file.file.read()
+                file.file.seek(0)
+
+                reader = PdfReader(io.BytesIO(raw_bytes))
+                extracted_pages = [
+                    (page.extract_text() or "").strip()
+                    for page in reader.pages
+                ]
+                full_text = "\n\n".join(p for p in extracted_pages if p).strip()
+                if not full_text:
+                    raise api_error(
+                        400,
+                        "EMPTY_FILE",
+                        "PDF file contains no readable study text.",
+                    )
+                return full_text
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise api_error(
+                    400,
+                    "EMPTY_FILE",
+                    f"Unable to read text from PDF file: {str(e)}",
+                )
+
+        if filename.endswith(".docx"):
+            from docx import Document
+
+            try:
+                raw_bytes = file.file.read()
+                file.file.seek(0)
+
+                doc = Document(io.BytesIO(raw_bytes))
+                parts: List[str] = [
+                    p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()
+                ]
+                for table in doc.tables:
+                    for row in table.rows:
+                        cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if cells:
+                            parts.append(" | ".join(cells))
+
+                full_text = "\n".join(parts).strip()
+                if not full_text:
+                    raise api_error(
+                        400,
+                        "EMPTY_FILE",
+                        "DOCX file contains no readable study text.",
+                    )
+                return full_text
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise api_error(
+                    400,
+                    "EMPTY_FILE",
+                    f"Unable to read text from DOCX file: {str(e)}",
+                )
+
+        raise api_error(
+            400,
+            "UNSUPPORTED_FILE_TYPE",
+            "Only CSV, TXT, PDF, and DOCX files are supported.",
+        )
+
+    @staticmethod
     def parse_file(file: UploadFile) -> List[Tuple[str, str]]:
         """Parse file based on file extension."""
         filename = (file.filename or "").lower()

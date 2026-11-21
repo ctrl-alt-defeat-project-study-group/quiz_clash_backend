@@ -216,6 +216,14 @@ def test_csrf_origin_guard_and_rate_limiting():
         )
         assert allowed.status_code == 200
 
+        # Same-origin request (e.g. Swagger UI /docs) allowed
+        same_origin = client.post(
+            "/api/v1/auth/login",
+            headers={"Origin": "http://testserver"},
+            json={"email": "csrf@example.com", "password": "Password123"},
+        )
+        assert same_origin.status_code == 200
+
         # Rate limit triggers 429 RATE_LIMITED
         rate_limiter.reset()
         with patch.object(settings, "RATE_LIMIT_AUTH_MAX_REQUESTS", 2):
@@ -349,3 +357,26 @@ def test_admin_seeding_endpoints_and_last_admin_guard():
             # Delete second user succeeds
             del_u = client_admin.delete(f"/api/v1/admin/users/{user.id}")
             assert del_u.status_code == 200
+
+
+def test_demo_user_seeding_and_login():
+    from app.services.bootstrap import seed_initial_user
+
+    with (
+        patch.object(settings, "DEMO_USER_EMAIL", "demo@example.com"),
+        patch.object(settings, "DEMO_USER_PASSWORD", "UserPassword123"),
+        patch.object(settings, "DEMO_USER_DISPLAY_NAME", "Demo User"),
+    ):
+        seed_initial_user()
+        seed_initial_user()  # idempotent
+
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/v1/auth/login",
+                json={"email": "demo@example.com", "password": "UserPassword123"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["email"] == "demo@example.com"
+            assert body["role"] == "user"
+            assert body["email_verified_at"] is not None

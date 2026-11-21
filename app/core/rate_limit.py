@@ -55,3 +55,13 @@ def rate_limit_auth(bucket: str):
         )
 
     return _dependency
+
+
+def enforce_llm_rate_limit(user_id: int) -> None:
+    """Enforce per-user rate limit for AI quiz generation requests."""
+    rate_limiter.check(
+        bucket="llm_generate",
+        key=str(user_id),
+        max_requests=settings.RATE_LIMIT_LLM_MAX_REQUESTS,
+        window_seconds=settings.RATE_LIMIT_LLM_WINDOW_SECONDS,
+    )

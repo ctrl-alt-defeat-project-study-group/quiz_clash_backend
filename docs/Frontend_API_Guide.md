@@ -239,7 +239,8 @@ fd.append("file", file);                 // required: .csv .txt .pdf .docx
 fd.append("title", "Cell structure");    // optional
 fd.append("category", "Biology");        // optional
 fd.append("question_count", "10");       // optional (5/10/15/20)
-fd.append("use_llm", "false");           // optional "true"|"false"
+fd.append("use_llm", "false");           // optional "true"|"false" (Gemini AI for unstructured files)
+fd.append("use_web_search", "true");     // optional "true"|"false" (default "true" when use_llm="true")
 fd.append("language", "en");             // optional "en"|"mm"
 
 const quiz = await api<Quiz>("/quizzes", { method: "POST", body: fd });

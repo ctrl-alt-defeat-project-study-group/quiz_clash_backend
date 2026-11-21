@@ -8,11 +8,13 @@ from fastapi import APIRouter, Depends, File, Form, Header, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.core.deps import ensure_owner_or_admin, get_current_user
 from app.core.errors import api_error
 from app.core.ids import parse_prefixed_id
 from app.core.language import resolve_request_language
-from app.db.models import Attempt, Choice, Question, Quiz, User
+from app.core.rate_limit import enforce_llm_rate_limit
+from app.db.models import Attempt, Choice, Question, Quiz, User, UserSettings
 from app.db.session import get_db
 from app.schemas.quiz import (
     QuizPreviewResponse,
@@ -20,6 +22,7 @@ from app.schemas.quiz import (
     QuizSummaryResponse,
     QuizUpdate,
 )
+from app.services.llm_quiz_generator import LLMQuizGenerator
 from app.services.parser import FileParser
 from app.services.quiz_generator import QuizGenerator
 
@@ -107,6 +110,7 @@ def create_quiz_from_file(
     title: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
     use_llm: bool = Form(False),
+    use_web_search: bool = Form(True),
     question_count: Optional[int] = Form(None),
     language: Optional[str] = Form(None),
     accept_language: Optional[str] = Header(default=None, alias="Accept-Language"),
@@ -116,10 +120,11 @@ def create_quiz_from_file(
     """
     Upload a file and generate a quiz from it.
 
-    - **file**: CSV, TXT, PDF, or DOCX file with terms and definitions
+    - **file**: CSV, TXT, PDF, or DOCX file with study notes or term-definition pairs
     - **title**: Optional title for the quiz (defaults to filename)
     - **category**: Optional subject/category label
-    - **use_llm**: Whether to use AI for question generation (not implemented yet)
+    - **use_llm**: Whether to use Gemini AI for question generation (supports unstructured files)
+    - **use_web_search**: When `use_llm=true`, enrich extracted keywords with Google Search grounding
     - **question_count**: Number of questions to generate (5, 10, 15, or 20)
     - **language**: Optional quiz language ('en' or 'mm'; 'my' accepted as alias)
     """
@@ -131,16 +136,7 @@ def create_quiz_from_file(
         )
 
     resolved_lang = resolve_request_language(language, accept_language)
-
     FileParser.validate_file(file)
-    terms_definitions = FileParser.parse_file(file)
-
-    if use_llm:
-        raise api_error(
-            501,
-            "GENERATION_FAILED",
-            "LLM-based generation is not yet implemented.",
-        )
 
     filename = file.filename or "Untitled Quiz"
     quiz_title = (
@@ -148,40 +144,98 @@ def create_quiz_from_file(
     )
     quiz_category = category.strip() if category and category.strip() else None
 
-    # Run duplicate detection before generation while honoring title, category, language, and question_count
-    source_content = f"lang={resolved_lang}\n" + "\n".join(
-        f"{t}:{d}" for t, d in terms_definitions
-    )
-    source_hash = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
-
-    existing_quizzes = (
-        db.query(Quiz)
-        .options(selectinload(Quiz.questions).selectinload(Question.choices))
-        .filter(
-            Quiz.owner_id == current_user.id,
-            Quiz.source_hash == source_hash,
-            Quiz.title == quiz_title,
-            Quiz.category == quiz_category,
+    if use_llm:
+        user_settings = (
+            db.query(UserSettings)
+            .filter(UserSettings.user_id == current_user.id)
+            .first()
         )
-        .all()
-    )
-    for existing_quiz in existing_quizzes:
-        if question_count is None or len(existing_quiz.questions) == question_count:
-            return format_quiz_response(existing_quiz, include_correct=False)
+        if question_count is not None:
+            effective_count = question_count
+        elif (
+            user_settings is not None
+            and user_settings.default_questions in ALLOWED_QUESTION_COUNTS
+        ):
+            effective_count = user_settings.default_questions
+        else:
+            effective_count = settings.DEFAULT_QUESTIONS_PER_QUIZ
 
-    questions_data = QuizGenerator.generate_from_structured(
-        terms_definitions,
-        question_count,
-        language=resolved_lang,
-    )
-    QuizGenerator.validate_questions(questions_data)
+        raw_text = FileParser.extract_raw_text(file)
+        source_content = (
+            f"mode=llm\nweb={use_web_search}\nlang={resolved_lang}\n"
+            f"count={effective_count}\n{raw_text}"
+        )
+        source_hash = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
+
+        existing_quizzes = (
+            db.query(Quiz)
+            .options(selectinload(Quiz.questions).selectinload(Question.choices))
+            .filter(
+                Quiz.owner_id == current_user.id,
+                Quiz.source_hash == source_hash,
+                Quiz.title == quiz_title,
+                Quiz.category == quiz_category,
+            )
+            .all()
+        )
+        for existing_quiz in existing_quizzes:
+            if len(existing_quiz.questions) == effective_count:
+                return format_quiz_response(existing_quiz, include_correct=False)
+
+        enforce_llm_rate_limit(current_user.id)
+
+        difficulty = (
+            user_settings.difficulty
+            if user_settings is not None and user_settings.difficulty
+            else "Mixed"
+        )
+        questions_data = LLMQuizGenerator.generate_from_text(
+            raw_text=raw_text,
+            question_count=effective_count,
+            language=resolved_lang,
+            difficulty=difficulty,
+            use_web_search=use_web_search,
+        )
+        QuizGenerator.validate_questions(questions_data)
+        source_type = "llm"
+    else:
+        terms_definitions = FileParser.parse_file(file)
+
+        # Run duplicate detection before generation while honoring title, category, language, and question_count
+        source_content = f"lang={resolved_lang}\n" + "\n".join(
+            f"{t}:{d}" for t, d in terms_definitions
+        )
+        source_hash = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
+
+        existing_quizzes = (
+            db.query(Quiz)
+            .options(selectinload(Quiz.questions).selectinload(Question.choices))
+            .filter(
+                Quiz.owner_id == current_user.id,
+                Quiz.source_hash == source_hash,
+                Quiz.title == quiz_title,
+                Quiz.category == quiz_category,
+            )
+            .all()
+        )
+        for existing_quiz in existing_quizzes:
+            if question_count is None or len(existing_quiz.questions) == question_count:
+                return format_quiz_response(existing_quiz, include_correct=False)
+
+        questions_data = QuizGenerator.generate_from_structured(
+            terms_definitions,
+            question_count,
+            language=resolved_lang,
+        )
+        QuizGenerator.validate_questions(questions_data)
+        source_type = _detect_source_type(filename)
 
     now = datetime.now(timezone.utc)
     db_quiz = Quiz(
         owner_id=current_user.id,
         title=quiz_title,
         category=quiz_category,
-        source_type=_detect_source_type(filename),
+        source_type=source_type,
         source_filename=filename,
         source_hash=source_hash,
         status="ready",

@@ -117,13 +117,14 @@ def test_health_and_contract_error_codes():
         assert r_pydantic.status_code == 422
         assert r_pydantic.json()["detail"]["code"] == "VALIDATION_ERROR"
 
-        # use_llm=true -> GENERATION_FAILED (501)
-        r_llm = c.post(
-            "/api/v1/quizzes",
-            files={"file": ("bio.csv", _sample_csv(), "text/csv")},
-            data={"use_llm": "true", "question_count": "5"},
-        )
-        assert r_llm.status_code == 501
+        # use_llm=true without LLM_API_KEY -> GENERATION_FAILED (503)
+        with patch.object(settings, "LLM_API_KEY", None):
+            r_llm = c.post(
+                "/api/v1/quizzes",
+                files={"file": ("bio.csv", _sample_csv(), "text/csv")},
+                data={"use_llm": "true", "question_count": "5"},
+            )
+        assert r_llm.status_code == 503
         assert r_llm.json()["detail"]["code"] == "GENERATION_FAILED"
 
 
