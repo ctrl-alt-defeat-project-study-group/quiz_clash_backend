@@ -69,3 +69,16 @@ def test_dockerfiles_and_compose_configuration():
     assert "postgres:16-alpine" in compose
     assert "alembic upgrade head" in compose
     assert "api:" in compose and "db:" in compose
+    assert "alembic upgrade head" in dockerfile
+    assert "${PORT:-8000}" in dockerfile
+
+
+def test_database_url_normalization():
+    s1 = Settings(DATABASE_URL="postgres://user:pass@host:5432/db")
+    assert s1.DATABASE_URL == "postgresql+psycopg2://user:pass@host:5432/db"
+
+    s2 = Settings(DATABASE_URL="postgresql://user:pass@host:5432/db")
+    assert s2.DATABASE_URL == "postgresql+psycopg2://user:pass@host:5432/db"
+
+    s3 = Settings(DATABASE_URL="sqlite:///./dev.db")
+    assert s3.DATABASE_URL == "sqlite:///./dev.db"

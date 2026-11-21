@@ -17,8 +17,8 @@ import app.db.models  # noqa: F401 - register all ORM models on Base.metadata
 # Alembic Config object
 config = context.config
 
-# Use DATABASE_URL from application settings / environment
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Use DATABASE_URL from application settings / environment (escape '%' for configparser)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:

@@ -15,6 +15,17 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+psycopg2://quizclash:quizclash@localhost:5432/quizclash"
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v):
+        if isinstance(v, str):
+            url = v.strip()
+            if url.startswith("postgres://"):
+                return "postgresql+psycopg2://" + url[len("postgres://"):]
+            if url.startswith("postgresql://"):
+                return "postgresql+psycopg2://" + url[len("postgresql://"):]
+        return v
+
     # CORS
     FRONTEND_ORIGINS: Union[List[str], str] = [
         "http://localhost:5173",  # Vite default
