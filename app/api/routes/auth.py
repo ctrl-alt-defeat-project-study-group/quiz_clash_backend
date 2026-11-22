@@ -30,6 +30,7 @@ from app.core.security import (
 from app.db.models import EmailToken, OAuthAccount, User
 from app.db.session import get_db
 from app.schemas.auth import (
+    ChangePasswordRequest,
     EmailRequest,
     LoginRequest,
     MessageResponse,
@@ -322,6 +323,36 @@ def reset_password(
     return {"message": "Password reset successfully."}
 
 
+@router.post("/change-password", response_model=MessageResponse)
+def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Change the current user's password (or set an initial password for OAuth-only accounts)."""
+    if current_user.password_hash:
+        if not payload.current_password or not verify_password(
+            payload.current_password, current_user.password_hash
+        ):
+            raise api_error(
+                400,
+                "INVALID_CURRENT_PASSWORD",
+                "Current password is incorrect.",
+            )
+        if payload.current_password == payload.new_password:
+            raise api_error(
+                400,
+                "PASSWORD_UNCHANGED",
+                "New password must be different from your current password.",
+            )
+
+    validate_password_strength(payload.new_password)
+    current_user.password_hash = hash_password(payload.new_password)
+    db.commit()
+
+    return {"message": "Password updated successfully."}
+
+
 # ---------------------------------------------------------------------------
 # Google OAuth 2.0 (Authorization Code + PKCE)
 # ---------------------------------------------------------------------------
@@ -355,8 +386,12 @@ def _clear_oauth_state_cookie(response: Response) -> None:
     response.delete_cookie(key=settings.OAUTH_STATE_COOKIE_NAME, **delete_kwargs)
 
 
-def _oauth_error_redirect(error_code: str) -> RedirectResponse:
-    error_path = settings.OAUTH_FRONTEND_ERROR_PATH or "/login"
+def _oauth_error_redirect(error_code: str, mode: str = "login") -> RedirectResponse:
+    error_path = (
+        "/register"
+        if mode == "register"
+        else (settings.OAUTH_FRONTEND_ERROR_PATH or "/login")
+    )
     resp = RedirectResponse(
         url=_frontend_redirect_url(error_path, {"oauth_error": error_code}),
         status_code=status.HTTP_302_FOUND,
@@ -379,6 +414,7 @@ def list_oauth_providers():
 def google_oauth_login(
     request: Request,
     next: Optional[str] = Query(default=None, description="Optional safe relative path to redirect to after login"),
+    mode: Optional[str] = Query(default="login", description="OAuth intent: 'login' or 'register'"),
 ):
     """Start Google OAuth 2.0 login/registration using Authorization Code + PKCE."""
     if not is_google_oauth_enabled():
@@ -389,6 +425,7 @@ def google_oauth_login(
         )
 
     safe_next = sanitize_next_path(next)
+    normalized_mode = "register" if (mode or "").strip().lower() == "register" else "login"
     state = secrets.token_urlsafe(32)
     code_verifier, code_challenge = generate_pkce_pair()
     state_jwt = create_oauth_state_token(
@@ -396,6 +433,7 @@ def google_oauth_login(
         state=state,
         code_verifier=code_verifier,
         next_path=safe_next,
+        mode=normalized_mode,
     )
 
     redirect_uri = _google_redirect_uri(request)
@@ -431,19 +469,25 @@ def google_oauth_callback(
     db: Session = Depends(get_db),
 ):
     """Handle Google OAuth callback, auto-link or auto-register user, and set auth cookies."""
+    state_cookie = request.cookies.get(settings.OAUTH_STATE_COOKIE_NAME)
+    state_payload = decode_oauth_state_token(state_cookie) if state_cookie else None
+    oauth_mode = (
+        "register"
+        if state_payload and state_payload.get("mode") == "register"
+        else "login"
+    )
+
     if not is_google_oauth_enabled():
-        return _oauth_error_redirect("OAUTH_PROVIDER_DISABLED")
+        return _oauth_error_redirect("OAUTH_PROVIDER_DISABLED", mode=oauth_mode)
 
     if error:
         if error == "access_denied":
-            return _oauth_error_redirect("OAUTH_CANCELLED")
-        return _oauth_error_redirect("OAUTH_PROVIDER_ERROR")
+            return _oauth_error_redirect("OAUTH_CANCELLED", mode=oauth_mode)
+        return _oauth_error_redirect("OAUTH_PROVIDER_ERROR", mode=oauth_mode)
 
-    state_cookie = request.cookies.get(settings.OAUTH_STATE_COOKIE_NAME)
     if not state_cookie or not state or not code:
-        return _oauth_error_redirect("OAUTH_INVALID_STATE")
+        return _oauth_error_redirect("OAUTH_INVALID_STATE", mode=oauth_mode)
 
-    state_payload = decode_oauth_state_token(state_cookie)
     if (
         not state_payload
         or state_payload.get("provider") != "google"
@@ -451,7 +495,7 @@ def google_oauth_callback(
         or not secrets.compare_digest(state_payload["state"], state)
         or not isinstance(state_payload.get("code_verifier"), str)
     ):
-        return _oauth_error_redirect("OAUTH_INVALID_STATE")
+        return _oauth_error_redirect("OAUTH_INVALID_STATE", mode=oauth_mode)
 
     redirect_uri = _google_redirect_uri(request)
     try:
@@ -461,7 +505,7 @@ def google_oauth_callback(
             code_verifier=state_payload["code_verifier"],
         )
     except OAuthProviderError as exc:
-        return _oauth_error_redirect(exc.code)
+        return _oauth_error_redirect(exc.code, mode=oauth_mode)
 
     now = datetime.now(timezone.utc)
     oauth_acct = (
@@ -474,11 +518,13 @@ def google_oauth_callback(
     )
 
     if oauth_acct is not None:
+        if oauth_mode == "register":
+            return _oauth_error_redirect("OAUTH_ACCOUNT_ALREADY_EXISTS", mode="register")
         user = db.query(User).filter(User.id == oauth_acct.user_id).first()
         if not user:
-            return _oauth_error_redirect("OAUTH_ACCOUNT_ERROR")
+            return _oauth_error_redirect("OAUTH_ACCOUNT_ERROR", mode=oauth_mode)
         if not user.is_active:
-            return _oauth_error_redirect("ACCOUNT_DISABLED")
+            return _oauth_error_redirect("ACCOUNT_DISABLED", mode=oauth_mode)
         if info.email and oauth_acct.provider_email != info.email:
             oauth_acct.provider_email = info.email
         if info.avatar_url and not user.avatar_url:
@@ -489,12 +535,14 @@ def google_oauth_callback(
         db.refresh(user)
     else:
         if not info.email or not info.email_verified:
-            return _oauth_error_redirect("OAUTH_EMAIL_NOT_VERIFIED")
+            return _oauth_error_redirect("OAUTH_EMAIL_NOT_VERIFIED", mode=oauth_mode)
 
         user = db.query(User).filter(User.email == info.email).first()
         if user is not None:
+            if oauth_mode == "register":
+                return _oauth_error_redirect("OAUTH_ACCOUNT_ALREADY_EXISTS", mode="register")
             if not user.is_active:
-                return _oauth_error_redirect("ACCOUNT_DISABLED")
+                return _oauth_error_redirect("ACCOUNT_DISABLED", mode=oauth_mode)
             if user.email_verified_at is None:
                 user.email_verified_at = now
             if info.avatar_url and not user.avatar_url:

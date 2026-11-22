@@ -150,15 +150,18 @@ def create_oauth_state_token(
     state: str,
     code_verifier: str,
     next_path: str,
+    mode: str = "login",
 ) -> str:
-    """Create a short-lived signed JWT storing OAuth CSRF state and PKCE verifier."""
+    """Create a short-lived signed JWT storing OAuth CSRF state, PKCE verifier, and mode."""
     now = datetime.now(timezone.utc)
+    normalized_mode = "register" if mode == "register" else "login"
     payload = {
         "type": "oauth_state",
         "provider": provider,
         "state": state,
         "code_verifier": code_verifier,
         "next": next_path,
+        "mode": normalized_mode,
         "iat": now,
         "exp": now + timedelta(seconds=settings.OAUTH_STATE_EXPIRE_SECONDS),
     }

@@ -33,10 +33,19 @@ def reset_db_and_oauth(monkeypatch):
     Base.metadata.drop_all(bind=engine)
 
 
-def _start_google_login(client: TestClient, next_path: str | None = None):
+def _start_google_login(
+    client: TestClient,
+    next_path: str | None = None,
+    mode: str | None = None,
+):
     url = "/api/v1/auth/oauth/google/login"
+    query_parts = []
     if next_path is not None:
-        url = f"{url}?next={next_path}"
+        query_parts.append(f"next={next_path}")
+    if mode is not None:
+        query_parts.append(f"mode={mode}")
+    if query_parts:
+        url = f"{url}?{'&'.join(query_parts)}"
     resp = client.get(url, follow_redirects=False)
     assert resp.status_code == 302
     location = resp.headers["location"]
@@ -355,3 +364,88 @@ def test_unlink_google_oauth_guard_and_success():
         me = client.get("/api/v1/auth/me")
         assert me.json()["oauth_providers"] == []
         assert me.json()["has_password"] is True
+
+
+def test_google_register_blocks_existing_oauth_account():
+    fake_user = GoogleUserInfo(
+        provider_user_id="google-sub-6006",
+        email="frank@gmail.com",
+        email_verified=True,
+        display_name="Frank",
+    )
+
+    with TestClient(app) as client:
+        # Initial registration via Google succeeds
+        _, _, params1 = _start_google_login(client, next_path="/dashboard", mode="register")
+        with patch("app.api.routes.auth.exchange_google_code_for_userinfo", return_value=fake_user):
+            cb1 = client.get(
+                f"/api/v1/auth/oauth/google/callback?code=c-reg-1&state={params1['state'][0]}",
+                follow_redirects=False,
+            )
+        assert cb1.status_code == 302
+        assert cb1.headers["location"] == "http://localhost:5173/dashboard"
+        assert settings.ACCESS_COOKIE_NAME in cb1.cookies
+
+    # A fresh client trying to sign up again with the same Gmail must be rejected
+    with TestClient(app) as client2:
+        _, _, params2 = _start_google_login(client2, next_path="/dashboard", mode="register")
+        with patch("app.api.routes.auth.exchange_google_code_for_userinfo", return_value=fake_user):
+            cb2 = client2.get(
+                f"/api/v1/auth/oauth/google/callback?code=c-reg-2&state={params2['state'][0]}",
+                follow_redirects=False,
+            )
+        assert cb2.status_code == 302
+        assert (
+            cb2.headers["location"]
+            == "http://localhost:5173/register?oauth_error=OAUTH_ACCOUNT_ALREADY_EXISTS"
+        )
+        assert settings.ACCESS_COOKIE_NAME not in cb2.cookies
+        assert settings.REFRESH_COOKIE_NAME not in cb2.cookies
+        assert client2.get("/api/v1/auth/me").status_code == 401
+
+
+def test_google_register_blocks_existing_email_password_account():
+    db = SessionLocal()
+    try:
+        existing = User(
+            email="grace@gmail.com",
+            password_hash=hash_password("Password123"),
+            display_name="Grace Local",
+            role="user",
+            is_active=True,
+            email_verified_at=datetime.now(timezone.utc),
+        )
+        db.add(existing)
+        db.commit()
+    finally:
+        db.close()
+
+    fake_user = GoogleUserInfo(
+        provider_user_id="google-sub-7007",
+        email="grace@gmail.com",
+        email_verified=True,
+        display_name="Grace Google",
+    )
+
+    with TestClient(app) as client:
+        _, _, params = _start_google_login(client, next_path="/dashboard", mode="register")
+        with patch("app.api.routes.auth.exchange_google_code_for_userinfo", return_value=fake_user):
+            cb = client.get(
+                f"/api/v1/auth/oauth/google/callback?code=c-reg-3&state={params['state'][0]}",
+                follow_redirects=False,
+            )
+        assert cb.status_code == 302
+        assert (
+            cb.headers["location"]
+            == "http://localhost:5173/register?oauth_error=OAUTH_ACCOUNT_ALREADY_EXISTS"
+        )
+        assert settings.ACCESS_COOKIE_NAME not in cb.cookies
+        assert settings.REFRESH_COOKIE_NAME not in cb.cookies
+        assert client.get("/api/v1/auth/me").status_code == 401
+
+    # Ensure Google OAuthAccount was not auto-linked during rejected signup
+    db = SessionLocal()
+    try:
+        assert db.query(OAuthAccount).filter(OAuthAccount.provider_email == "grace@gmail.com").count() == 0
+    finally:
+        db.close()
