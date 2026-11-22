@@ -37,13 +37,15 @@ class MailerService:
     @classmethod
     def send_verification_email(cls, to_email: str, display_name: str, token: str) -> str:
         base = settings.APP_BASE_URL.rstrip("/")
-        link = f"{base}/verify-email?token={quote(token)}"
+        link = f"{base}/verify-email?email={quote(to_email)}&token={quote(token)}"
         body = (
             f"Hi {display_name},\n\n"
-            f"Verify your QuizClash account by opening this link:\n{link}\n\n"
-            f"This link expires in {settings.EMAIL_TOKEN_EXPIRE_HOURS} hours.\n"
+            f"Your QuizClash verification code (OTP) is:\n\n"
+            f"    {token}\n\n"
+            f"Enter this 6-digit code on the verification page, or open this link:\n{link}\n\n"
+            f"This code expires in 15 minutes.\n"
         )
-        cls._send(to_email, "Verify your QuizClash email", body)
+        cls._send(to_email, f"Your QuizClash verification code: {token}", body)
         return link
 
     @classmethod

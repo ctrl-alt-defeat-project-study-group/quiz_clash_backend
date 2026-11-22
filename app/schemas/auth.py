@@ -14,7 +14,8 @@ class RegisterRequest(BaseModel):
 
 
 class VerifyEmailRequest(BaseModel):
-    token: str = Field(..., min_length=1)
+    token: str = Field(..., min_length=1, max_length=128)
+    email: Optional[EmailStr] = None
 
 
 class EmailRequest(BaseModel):

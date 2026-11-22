@@ -19,6 +19,7 @@ from app.core.security import (
     create_oauth_state_token,
     decode_oauth_state_token,
     decode_token,
+    generate_email_otp,
     generate_email_token,
     generate_pkce_pair,
     hash_email_token,
@@ -62,7 +63,8 @@ def _issue_email_token(
     db: Session,
     user: User,
     purpose: str,
-    expire_hours: int,
+    expire_hours: Optional[int] = None,
+    expire_minutes: Optional[int] = None,
 ) -> str:
     """Invalidate unused prior tokens of the same purpose and issue a new one."""
     now = datetime.now(timezone.utc)
@@ -72,12 +74,18 @@ def _issue_email_token(
         EmailToken.used_at.is_(None),
     ).update({"used_at": now}, synchronize_session=False)
 
-    raw_token, token_hash = generate_email_token()
+    if purpose == "verify":
+        raw_token, token_hash = generate_email_otp()
+        ttl = timedelta(minutes=expire_minutes if expire_minutes is not None else 15)
+    else:
+        raw_token, token_hash = generate_email_token()
+        ttl = timedelta(hours=expire_hours if expire_hours is not None else 1)
+
     db_token = EmailToken(
         user_id=user.id,
         purpose=purpose,
         token_hash=token_hash,
-        expires_at=now + timedelta(hours=expire_hours),
+        expires_at=now + ttl,
     )
     db.add(db_token)
     return raw_token
@@ -126,18 +134,31 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     return user
 
 
-@router.post("/verify-email", response_model=MessageResponse)
+@router.post(
+    "/verify-email",
+    response_model=MessageResponse,
+    dependencies=[Depends(rate_limit_auth("verify_email"))],
+)
 def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
-    """Verify a user's email address using a one-time token."""
+    """Verify a user's email address using a one-time 6-digit OTP code."""
     token_hash = hash_email_token(payload.token.strip())
-    db_token = (
-        db.query(EmailToken)
-        .filter(
-            EmailToken.token_hash == token_hash,
-            EmailToken.purpose == "verify",
-        )
-        .first()
+    query = db.query(EmailToken).filter(
+        EmailToken.token_hash == token_hash,
+        EmailToken.purpose == "verify",
     )
+    if payload.email:
+        target_user = (
+            db.query(User).filter(User.email == payload.email.strip().lower()).first()
+        )
+        if not target_user:
+            raise api_error(
+                400,
+                "TOKEN_INVALID_OR_EXPIRED",
+                "Verification code is invalid or has expired.",
+            )
+        query = query.filter(EmailToken.user_id == target_user.id)
+
+    db_token = query.first()
 
     now = datetime.now(timezone.utc)
     if (
@@ -148,7 +169,7 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
         raise api_error(
             400,
             "TOKEN_INVALID_OR_EXPIRED",
-            "Verification token is invalid or has expired.",
+            "Verification code is invalid or has expired.",
         )
 
     user = db.query(User).filter(User.id == db_token.user_id).first()
@@ -156,7 +177,7 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
         raise api_error(
             400,
             "TOKEN_INVALID_OR_EXPIRED",
-            "Verification token is invalid or has expired.",
+            "Verification code is invalid or has expired.",
         )
 
     db_token.used_at = now
@@ -329,22 +350,28 @@ def change_password(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change the current user's password (or set an initial password for OAuth-only accounts)."""
-    if current_user.password_hash:
-        if not payload.current_password or not verify_password(
-            payload.current_password, current_user.password_hash
-        ):
-            raise api_error(
-                400,
-                "INVALID_CURRENT_PASSWORD",
-                "Current password is incorrect.",
-            )
-        if payload.current_password == payload.new_password:
-            raise api_error(
-                400,
-                "PASSWORD_UNCHANGED",
-                "New password must be different from your current password.",
-            )
+    """Change the current user's password (disabled for Google OAuth-only accounts)."""
+    if not current_user.password_hash:
+        raise api_error(
+            400,
+            "OAUTH_PASSWORD_MANAGED_EXTERNALLY",
+            "Password changes are disabled for Google sign-in accounts.",
+        )
+
+    if not payload.current_password or not verify_password(
+        payload.current_password, current_user.password_hash
+    ):
+        raise api_error(
+            400,
+            "INVALID_CURRENT_PASSWORD",
+            "Current password is incorrect.",
+        )
+    if payload.current_password == payload.new_password:
+        raise api_error(
+            400,
+            "PASSWORD_UNCHANGED",
+            "New password must be different from your current password.",
+        )
 
     validate_password_strength(payload.new_password)
     current_user.password_hash = hash_password(payload.new_password)

@@ -99,7 +99,7 @@ def test_change_password_success_and_validation():
         )
 
 
-def test_set_initial_password_for_oauth_only_user():
+def test_change_password_disabled_for_oauth_only_user():
     user_id = _create_verified_user("oauth@gmail.com", None)
     db = SessionLocal()
     try:
@@ -116,7 +116,6 @@ def test_set_initial_password_for_oauth_only_user():
         db.close()
 
     with TestClient(app) as client:
-        # Simulate authenticated OAuth session cookie
         from fastapi import Response
 
         dummy = Response()
@@ -134,17 +133,56 @@ def test_set_initial_password_for_oauth_only_user():
             "/api/v1/auth/change-password",
             json={"new_password": "FirstPass123"},
         )
-        assert res.status_code == 200
+        assert res.status_code == 400
+        assert res.json()["detail"]["code"] == "OAUTH_PASSWORD_MANAGED_EXTERNALLY"
 
         me_after = client.get("/api/v1/auth/me")
         assert me_after.status_code == 200
-        assert me_after.json()["has_password"] is True
+        assert me_after.json()["has_password"] is False
 
-        # Can now login with password
-        assert (
-            client.post(
+
+def test_register_sends_6_digit_otp_and_verifies_with_email():
+    from unittest.mock import patch
+    from app.services.mailer import MailerService
+
+    captured: list[str] = []
+
+    def fake_send(to_email: str, display_name: str, token: str) -> str:
+        captured.append(token)
+        return f"http://localhost:5173/verify-email?email={to_email}&token={token}"
+
+    with patch.object(MailerService, "send_verification_email", side_effect=fake_send):
+        with TestClient(app) as client:
+            reg = client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": "otpuser@example.com",
+                    "password": "Password123",
+                    "display_name": "OTP User",
+                },
+            )
+            assert reg.status_code == 201
+            assert len(captured) == 1
+            otp = captured[0]
+            assert len(otp) == 6 and otp.isdigit()
+
+            # Wrong email with valid OTP must fail
+            wrong_email = client.post(
+                "/api/v1/auth/verify-email",
+                json={"email": "someoneelse@example.com", "token": otp},
+            )
+            assert wrong_email.status_code == 400
+
+            # Correct email + 6-digit OTP succeeds
+            ok = client.post(
+                "/api/v1/auth/verify-email",
+                json={"email": "otpuser@example.com", "token": otp},
+            )
+            assert ok.status_code == 200
+
+            # Now login works
+            login_res = client.post(
                 "/api/v1/auth/login",
-                json={"email": "oauth@gmail.com", "password": "FirstPass123"},
-            ).status_code
-            == 200
-        )
+                json={"email": "otpuser@example.com", "password": "Password123"},
+            )
+            assert login_res.status_code == 200

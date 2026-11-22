@@ -133,6 +133,12 @@ def generate_email_token() -> Tuple[str, str]:
     return raw, hash_email_token(raw)
 
 
+def generate_email_otp() -> Tuple[str, str]:
+    """Return (6-digit numeric OTP, sha256_hash) for one-time email verification."""
+    raw = f"{secrets.randbelow(1_000_000):06d}"
+    return raw, hash_email_token(raw)
+
+
 def hash_email_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
