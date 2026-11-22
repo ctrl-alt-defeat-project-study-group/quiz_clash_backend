@@ -2,7 +2,7 @@
 Pydantic schemas for authentication and user profile endpoints.
 """
 from datetime import datetime
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -37,9 +37,16 @@ class UserProfileResponse(BaseModel):
     id: int
     email: EmailStr
     display_name: str
+    avatar_url: Optional[str] = None
     role: Literal["user", "admin"]
     is_active: bool
     email_verified_at: Optional[datetime] = None
+    has_password: bool = True
+    oauth_providers: List[str] = Field(default_factory=list)
+
+
+class OAuthProvidersResponse(BaseModel):
+    providers: List[str]
 
 
 class MessageResponse(BaseModel):

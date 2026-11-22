@@ -3,6 +3,7 @@ In-memory live multiplayer room session manager and WebSocket broadcaster.
 """
 import asyncio
 from dataclasses import dataclass, field
+import re
 import secrets
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -15,19 +16,39 @@ BASE_POINTS = 1000
 MAX_LATENCY_BONUS = 500
 
 
+def _extract_two_letters(source: Optional[str], fallback: str) -> str:
+    """Extract 2 uppercase ASCII letters from an account local-part or quiz topic."""
+    if not source:
+        return fallback
+    words = re.findall(r"[A-Za-z]+", source)
+    if len(words) >= 2:
+        return (words[0][0] + words[1][0]).upper()
+    if len(words) == 1:
+        w = words[0].upper()
+        if len(w) >= 2:
+            return w[:2]
+        return (w + fallback)[:2]
+    return fallback
+
+
 def normalize_room_pin(raw_pin: str) -> str:
-    """Validate and normalize a 6-digit room PIN (accepts '482 619' or '482619')."""
+    """Validate and normalize a room code (e.g. 'ADBI 482', 'ADBI482', or legacy '482 619')."""
     if not isinstance(raw_pin, str):
-        raise api_error(400, "INVALID_ROOM_PIN", "Room PIN must be 6 digits.")
-    digits = raw_pin.replace(" ", "").replace("-", "").strip()
-    if len(digits) != 6 or not digits.isdigit():
-        raise api_error(400, "INVALID_ROOM_PIN", "Room PIN must be 6 digits.")
-    return digits
+        raise api_error(400, "INVALID_ROOM_PIN", "Room code must be 6–12 letters or digits.")
+    cleaned = re.sub(r"[\s-]+", "", raw_pin).strip().upper()
+    if not (6 <= len(cleaned) <= 12) or not cleaned.isalnum():
+        raise api_error(400, "INVALID_ROOM_PIN", "Room code must be 6–12 letters or digits.")
+    return cleaned
 
 
 def format_room_pin(normalized_pin: str) -> str:
-    """Format a 6-digit PIN as '123 456' to match the frontend contract."""
-    return f"{normalized_pin[:3]} {normalized_pin[3:]}"
+    """Format a normalized room code for display (e.g. 'ADBI 482' or '123 456')."""
+    if len(normalized_pin) == 6 and normalized_pin.isdigit():
+        return f"{normalized_pin[:3]} {normalized_pin[3:]}"
+    m = re.match(r"^([A-Z]+)(\d+)$", normalized_pin)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+    return normalized_pin
 
 
 @dataclass
@@ -35,15 +56,18 @@ class LivePlayer:
     id: str
     name: str
     user_id: Optional[int] = None
-    status: str = "Ready"
+    avatar_url: Optional[str] = None
+    status: str = "Waiting"
     correct: int = 0
     total: int = 0
     points: int = 0
+    answers: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
+            "avatar_url": self.avatar_url,
             "status": self.status,
             "correct": self.correct,
             "total": self.total,
@@ -53,15 +77,16 @@ class LivePlayer:
 
 @dataclass
 class LiveRoomSession:
-    pin: str  # 6 normalized digits
+    pin: str
     quiz_id: int
     host_id: int
     timer_seconds: int
-    questions: List[Dict[str, Any]]  # Each has id, prompt, position, choices (with is_correct)
+    questions: List[Dict[str, Any]]  # Each has id, db_id, prompt, position, choices (with is_correct, db_id)
     status: str = "lobby"  # lobby | active | finished | closed
     round: int = 0  # 0 in lobby, 1..total_rounds when active
     players: Dict[str, LivePlayer] = field(default_factory=dict)
     connections: Set[WebSocket] = field(default_factory=set)
+    game_started_at: Optional[float] = None
     round_started_at: Optional[float] = None
     round_deadline: Optional[float] = None
     round_answered_players: Set[str] = field(default_factory=set)
@@ -72,12 +97,33 @@ class LiveRoomSession:
     def total_rounds(self) -> int:
         return len(self.questions)
 
-    def add_player(self, display_name: str, user_id: Optional[int] = None) -> LivePlayer:
+    def add_player(
+        self,
+        display_name: str,
+        user_id: Optional[int] = None,
+        avatar_url: Optional[str] = None,
+    ) -> LivePlayer:
         self._player_seq += 1
         player_id = f"player_{self._player_seq}"
-        player = LivePlayer(id=player_id, name=display_name.strip(), user_id=user_id)
+        player = LivePlayer(
+            id=player_id,
+            name=display_name.strip(),
+            user_id=user_id,
+            avatar_url=avatar_url,
+            status="Waiting",
+        )
         self.players[player_id] = player
         return player
+
+    def mark_player_ready(self, player_id: str) -> Optional[LivePlayer]:
+        player = self.players.get(player_id)
+        if player is not None:
+            player.status = "Ready"
+        return player
+
+    def remove_player(self, player_id: str) -> Optional[LivePlayer]:
+        self.round_answered_players.discard(player_id)
+        return self.players.pop(player_id, None)
 
     def current_question_public(self) -> Optional[Dict[str, Any]]:
         """Return the active round's question without revealing is_correct."""
@@ -133,6 +179,8 @@ class LiveRoomSession:
             for p in self.players.values():
                 p.status = "Ready"
             now = time.monotonic()
+            if self.game_started_at is None:
+                self.game_started_at = now
             self.round_started_at = now
             self.round_deadline = now + self.timer_seconds
             return self.status, self.current_question_public()
@@ -160,8 +208,11 @@ class LiveRoomSession:
 
         normalized_choice = (choice_id or "").strip().lower()
         q = self.questions[self.round - 1]
-        valid_choice_ids = {c["id"] for c in q["choices"]}
-        if normalized_choice not in valid_choice_ids:
+        selected_choice = next(
+            (c for c in q["choices"] if c["id"] == normalized_choice),
+            None,
+        )
+        if not selected_choice:
             return {"error": f"Invalid choice '{choice_id}'."}
 
         self.round_answered_players.add(player_id)
@@ -177,6 +228,17 @@ class LiveRoomSession:
             ratio = min(1.0, remaining / max(1, self.timer_seconds))
             points_earned = BASE_POINTS + int(MAX_LATENCY_BONUS * ratio)
             player.points += points_earned
+
+        q_db_id = q.get("db_id")
+        c_db_id = selected_choice.get("db_id")
+        if q_db_id is not None and c_db_id is not None:
+            player.answers.append(
+                {
+                    "question_db_id": q_db_id,
+                    "choice_db_id": c_db_id,
+                    "is_correct": is_correct,
+                }
+            )
 
         return {
             "player_id": player_id,
@@ -199,15 +261,34 @@ class LiveRoomManager:
             room.cancel_timer()
         self._rooms.clear()
 
-    def generate_unique_pin(self, existing_pins: Optional[Set[str]] = None) -> str:
+    def generate_unique_pin(
+        self,
+        existing_pins: Optional[Set[str]] = None,
+        account_email: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> str:
         taken = set(self._rooms.keys())
         if existing_pins:
-            taken |= existing_pins
-        for _ in range(100):
-            candidate = f"{secrets.randbelow(900000) + 100000}"
+            taken |= {p.upper() for p in existing_pins}
+
+        local_part = (account_email or "").split("@", 1)[0]
+        acct_code = _extract_two_letters(local_part, "QC")
+        topic_code = _extract_two_letters(topic, "QZ")
+        prefix = f"{acct_code}{topic_code}"
+
+        # Try 3 random digits first (e.g. ADBI482)
+        for _ in range(150):
+            candidate = f"{prefix}{secrets.randbelow(900) + 100}"
             if candidate not in taken:
                 return candidate
-        raise api_error(500, "SERVER_ERROR", "Unable to allocate a unique room PIN.")
+
+        # Fallback to 4 random digits if prefix space is dense (e.g. ADBI4829)
+        for _ in range(150):
+            candidate = f"{prefix}{secrets.randbelow(9000) + 1000}"
+            if candidate not in taken:
+                return candidate
+
+        raise api_error(500, "SERVER_ERROR", "Unable to allocate a unique room code.")
 
     def create_session(
         self,
@@ -229,6 +310,11 @@ class LiveRoomManager:
 
     def get_session(self, pin: str) -> Optional[LiveRoomSession]:
         return self._rooms.get(pin)
+
+    def remove_session(self, pin: str) -> None:
+        session = self._rooms.pop(pin, None)
+        if session is not None:
+            session.cancel_timer()
 
     def remove_rooms_for_host(self, host_id: int) -> None:
         to_remove = [pin for pin, s in self._rooms.items() if s.host_id == host_id]

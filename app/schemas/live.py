@@ -1,6 +1,7 @@
 """
 Pydantic schemas for live multiplayer rooms (Phase 7).
 """
+from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -17,7 +18,8 @@ class LiveRoomJoin(BaseModel):
 class LivePlayerState(BaseModel):
     id: str
     name: str
-    status: str  # "Ready" | "Answered"
+    avatar_url: Optional[str] = None
+    status: str  # "Waiting" | "Ready" | "Answered"
     correct: int
     total: int
     points: int
@@ -52,3 +54,32 @@ class LiveJoinResponse(LiveGameState):
 
 class LiveNextResponse(LiveGameState):
     current_question: Optional[LiveQuestionPayload] = None
+
+
+class LiveHistoryPlayer(BaseModel):
+    name: str
+    correct: int
+    total: int
+    points: int
+    is_me: bool = False
+
+
+class LiveRoomHistoryItem(BaseModel):
+    id: str
+    pin: str
+    quiz_id: str
+    quiz_title: str
+    timer_seconds: int
+    total_rounds: int
+    status: str
+    role: str  # "host" | "player"
+    player_count: int
+    winner_name: Optional[str] = None
+    winner_points: int = 0
+    my_points: Optional[int] = None
+    my_correct: Optional[int] = None
+    my_total: Optional[int] = None
+    my_rank: Optional[int] = None
+    players: List[LiveHistoryPlayer] = Field(default_factory=list)
+    created_at: datetime
+    finished_at: Optional[datetime] = None

@@ -1,6 +1,9 @@
 """
 API routes and WebSocket handler for live multiplayer rooms (Phase 7).
 """
+from datetime import datetime, timezone
+import json
+import time
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session, selectinload
@@ -8,17 +11,19 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.deps import ensure_owner_or_admin, get_current_user, get_optional_user
 from app.core.errors import api_error
 from app.core.ids import parse_prefixed_id
-from app.db.models import LiveRoom, Question, Quiz, User
+from app.db.models import Attempt, AttemptAnswer, LiveRoom, Question, Quiz, User
 from app.db.session import SessionLocal, get_db
 from app.schemas.live import (
     LiveGameState,
     LiveJoinResponse,
     LiveNextResponse,
     LiveRoomCreate,
+    LiveRoomHistoryItem,
     LiveRoomJoin,
 )
 from app.services.live_manager import (
     LiveRoomSession,
+    format_room_pin,
     live_room_manager,
     normalize_room_pin,
 )
@@ -34,6 +39,7 @@ def _serialize_quiz_questions(db_quiz: Quiz) -> List[Dict[str, Any]]:
         choices = [
             {
                 "id": chr(97 + idx),
+                "db_id": c.id,
                 "text": c.text,
                 "position": idx,
                 "is_correct": c.is_correct,
@@ -43,6 +49,7 @@ def _serialize_quiz_questions(db_quiz: Quiz) -> List[Dict[str, Any]]:
         questions_payload.append(
             {
                 "id": f"q_{q.id}",
+                "db_id": q.id,
                 "prompt": q.prompt,
                 "position": q.position,
                 "choices": choices,
@@ -116,7 +123,11 @@ def create_live_room(
         raise api_error(400, "VALIDATION_ERROR", "Quiz has no questions.")
 
     existing_pins = {row[0] for row in db.query(LiveRoom.pin).all()}
-    pin = live_room_manager.generate_unique_pin(existing_pins)
+    pin = live_room_manager.generate_unique_pin(
+        existing_pins=existing_pins,
+        account_email=current_user.email,
+        topic=db_quiz.category or db_quiz.title,
+    )
 
     db_room = LiveRoom(
         quiz_id=db_quiz.id,
@@ -172,6 +183,7 @@ async def join_live_room(
     player = session.add_player(
         display_name=display_name,
         user_id=current_user.id if current_user else None,
+        avatar_url=current_user.avatar_url if current_user else None,
     )
     state = session.to_state_dict()
 
@@ -181,6 +193,189 @@ async def join_live_room(
     )
 
     return {**state, "player_id": player.id}
+
+
+@router.post("/live/rooms/{pin}/players/{player_id}/ready", response_model=LiveGameState)
+async def mark_live_player_ready(
+    pin: str,
+    player_id: str,
+    db: Session = Depends(get_db),
+):
+    """Mark a player as Ready when they click 'Enter live game'."""
+    normalized_pin = normalize_room_pin(pin)
+    session = _get_or_restore_session(normalized_pin, db)
+
+    player = session.mark_player_ready(player_id)
+    if player is None:
+        raise api_error(404, "PLAYER_NOT_FOUND", "Player not found in this live room.")
+
+    state = session.to_state_dict()
+    await live_room_manager.broadcast(
+        session,
+        {"type": "player_ready", "player_id": player_id, "state": state},
+    )
+    return state
+
+
+@router.delete("/live/rooms/{pin}/players/{player_id}", response_model=LiveGameState)
+async def leave_live_room_player(
+    pin: str,
+    player_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Remove a player from a live room (e.g. host opting out of participating before start)."""
+    normalized_pin = normalize_room_pin(pin)
+    session = _get_or_restore_session(normalized_pin, db)
+
+    target = session.players.get(player_id)
+    if target is None:
+        return session.to_state_dict()
+
+    is_host_or_admin = (
+        current_user.role == "admin" or session.host_id == current_user.id
+    )
+    is_self = target.user_id is not None and target.user_id == current_user.id
+    if not (is_host_or_admin or is_self):
+        raise api_error(403, "FORBIDDEN", "Not allowed to remove this player.")
+
+    session.remove_player(player_id)
+    state = session.to_state_dict()
+
+    await live_room_manager.broadcast(
+        session,
+        {"type": "player_left", "player_id": player_id, "state": state},
+    )
+    return state
+
+
+@router.delete("/live/rooms/{pin}")
+async def close_live_room(
+    pin: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Close an active/lobby room. Unfinished rooms are deleted; finished rooms remain for history."""
+    normalized_pin = normalize_room_pin(pin)
+    db_room = db.query(LiveRoom).filter(LiveRoom.pin == normalized_pin).first()
+    if db_room is not None:
+        ensure_owner_or_admin(db_room.host_id, current_user)
+        if db_room.status != "finished":
+            db.delete(db_room)
+            db.commit()
+
+    session = live_room_manager.get_session(normalized_pin)
+    if session is not None:
+        await live_room_manager.broadcast(
+            session,
+            {"type": "room_closed", "pin": format_room_pin(normalized_pin)},
+        )
+    live_room_manager.remove_session(normalized_pin)
+    return {"message": "Room closed."}
+
+
+@router.get("/live/history", response_model=List[LiveRoomHistoryItem])
+def list_live_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List finished live game rooms hosted or played by the authenticated user."""
+    rooms = (
+        db.query(LiveRoom)
+        .options(selectinload(LiveRoom.quiz))
+        .filter(LiveRoom.status == "finished")
+        .order_by(LiveRoom.finished_at.desc(), LiveRoom.created_at.desc(), LiveRoom.id.desc())
+        .all()
+    )
+
+    items: List[Dict[str, Any]] = []
+    for room in rooms:
+        summary: Dict[str, Any] = {}
+        if room.results_json:
+            try:
+                summary = json.loads(room.results_json)
+            except Exception:
+                summary = {}
+
+        participant_ids = summary.get("participant_user_ids") or []
+        is_host = room.host_id == current_user.id
+        is_participant = current_user.id in participant_ids
+        if not is_host and not is_participant:
+            continue
+
+        raw_players = summary.get("players") or []
+        players_out = []
+        my_points = None
+        my_correct = None
+        my_total = None
+        my_rank = None
+
+        for rank_idx, p in enumerate(raw_players, start=1):
+            p_uid = p.get("user_id")
+            is_me = p_uid is not None and p_uid == current_user.id
+            if is_me and my_rank is None:
+                my_rank = rank_idx
+                my_points = int(p.get("points") or 0)
+                my_correct = int(p.get("correct") or 0)
+                my_total = int(p.get("total") or 0)
+            players_out.append(
+                {
+                    "name": p.get("name") or "Player",
+                    "correct": int(p.get("correct") or 0),
+                    "total": int(p.get("total") or 0),
+                    "points": int(p.get("points") or 0),
+                    "is_me": is_me,
+                }
+            )
+
+        items.append(
+            {
+                "id": f"room_{room.id}",
+                "pin": format_room_pin(room.pin),
+                "quiz_id": f"quiz_{room.quiz_id}",
+                "quiz_title": room.quiz.title if room.quiz else "Untitled Quiz",
+                "timer_seconds": room.timer_seconds,
+                "total_rounds": int(summary.get("total_rounds") or 0),
+                "status": room.status,
+                "role": "host" if is_host else "player",
+                "player_count": int(summary.get("player_count") or len(players_out)),
+                "winner_name": summary.get("winner_name"),
+                "winner_points": int(summary.get("winner_points") or 0),
+                "my_points": my_points,
+                "my_correct": my_correct,
+                "my_total": my_total,
+                "my_rank": my_rank,
+                "players": players_out,
+                "created_at": room.created_at,
+                "finished_at": room.finished_at or room.created_at,
+            }
+        )
+
+    return items
+
+
+@router.delete("/live/history/{room_id}")
+def delete_live_history_room(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a finished live room from history (host or admin only)."""
+    numeric_id = parse_prefixed_id(
+        room_id,
+        "room",
+        status_code=404,
+        detail="Live room not found.",
+        code="ROOM_NOT_FOUND",
+    )
+    db_room = db.query(LiveRoom).filter(LiveRoom.id == numeric_id).first()
+    if not db_room:
+        raise api_error(404, "ROOM_NOT_FOUND", "Live room not found.")
+
+    ensure_owner_or_admin(db_room.host_id, current_user)
+    db.delete(db_room)
+    db.commit()
+    return {"message": "Live game history entry deleted."}
 
 
 @router.post("/live/rooms/{pin}/next", response_model=LiveNextResponse)
@@ -195,12 +390,71 @@ async def advance_live_room(
 
     ensure_owner_or_admin(session.host_id, current_user)
 
+    was_already_finished = session.status == "finished"
     new_status, question = session.advance_round()
 
-    # Persist room status transition
+    # Persist room status transition (and finished summary + logged-in attempts)
     db_room = db.query(LiveRoom).filter(LiveRoom.pin == normalized_pin).first()
     if db_room:
         db_room.status = new_status
+        if new_status == "finished" and not was_already_finished:
+            elapsed_seconds = (
+                max(1, int(round(time.monotonic() - session.game_started_at)))
+                if session.game_started_at is not None
+                else session.total_rounds * session.timer_seconds
+            )
+            sorted_players = sorted(
+                session.players.values(),
+                key=lambda p: (-p.points, -p.correct, p.id),
+            )
+            winner = sorted_players[0] if sorted_players else None
+            participant_user_ids = sorted(
+                {p.user_id for p in sorted_players if p.user_id is not None}
+            )
+            db_room.finished_at = datetime.now(timezone.utc)
+            db_room.results_json = json.dumps(
+                {
+                    "total_rounds": session.total_rounds,
+                    "duration_seconds": elapsed_seconds,
+                    "player_count": len(sorted_players),
+                    "winner_name": winner.name if winner else None,
+                    "winner_points": winner.points if winner else 0,
+                    "participant_user_ids": participant_user_ids,
+                    "players": [
+                        {
+                            "name": p.name,
+                            "user_id": p.user_id,
+                            "correct": p.correct,
+                            "total": p.total,
+                            "points": p.points,
+                        }
+                        for p in sorted_players
+                    ],
+                }
+            )
+
+            # Persist Attempt + AttemptAnswer records for logged-in participants only
+            for p in sorted_players:
+                if p.user_id is None:
+                    continue
+                db_attempt = Attempt(
+                    quiz_id=session.quiz_id,
+                    user_id=p.user_id,
+                    score=p.correct,
+                    total_questions=session.total_rounds,
+                    duration_seconds=elapsed_seconds,
+                )
+                db.add(db_attempt)
+                db.flush()
+                for ans in p.answers:
+                    db.add(
+                        AttemptAnswer(
+                            attempt_id=db_attempt.id,
+                            question_id=ans["question_db_id"],
+                            choice_id=ans["choice_db_id"],
+                            is_correct=ans["is_correct"],
+                        )
+                    )
         db.commit()
 
     state = session.to_state_dict()

@@ -1,9 +1,13 @@
 """
-API routes for authentication, email verification, and password reset.
+API routes for authentication, Google OAuth 2.0, email verification, and password reset.
 """
 from datetime import datetime, timedelta, timezone
+import secrets
+from typing import Optional
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -12,26 +16,37 @@ from app.core.rate_limit import rate_limit_auth
 from app.core.security import (
     api_error,
     clear_auth_cookies,
+    create_oauth_state_token,
+    decode_oauth_state_token,
     decode_token,
     generate_email_token,
+    generate_pkce_pair,
     hash_email_token,
     hash_password,
     set_auth_cookies,
     validate_password_strength,
     verify_password,
 )
-from app.db.models import EmailToken, User
+from app.db.models import EmailToken, OAuthAccount, User
 from app.db.session import get_db
 from app.schemas.auth import (
     EmailRequest,
     LoginRequest,
     MessageResponse,
+    OAuthProvidersResponse,
     RegisterRequest,
     ResetPasswordRequest,
     UserProfileResponse,
     VerifyEmailRequest,
 )
 from app.services.mailer import MailerService
+from app.services.oauth import (
+    OAuthProviderError,
+    build_google_authorization_url,
+    exchange_google_code_for_userinfo,
+    is_google_oauth_enabled,
+    sanitize_next_path,
+)
 
 router = APIRouter(prefix="/auth")
 
@@ -184,7 +199,7 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
     email = payload.email.strip().lower()
     user = db.query(User).filter(User.email == email).first()
 
-    if not user or not verify_password(payload.password, user.password_hash):
+    if not user or not user.password_hash or not verify_password(payload.password, user.password_hash):
         raise api_error(401, "INVALID_CREDENTIALS", "Invalid email or password.")
 
     if not user.is_active:
@@ -305,3 +320,251 @@ def reset_password(
     clear_auth_cookies(response)
 
     return {"message": "Password reset successfully."}
+
+
+# ---------------------------------------------------------------------------
+# Google OAuth 2.0 (Authorization Code + PKCE)
+# ---------------------------------------------------------------------------
+
+
+def _google_redirect_uri(request: Request) -> str:
+    base = (settings.OAUTH_REDIRECT_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        base = str(request.base_url).rstrip("/")
+    return f"{base}/api/v1/auth/oauth/google/callback"
+
+
+def _frontend_redirect_url(path: str, query: Optional[dict] = None) -> str:
+    base = (settings.APP_BASE_URL or "http://localhost:5173").rstrip("/")
+    clean_path = path if path.startswith("/") else f"/{path}"
+    if query:
+        return f"{base}{clean_path}?{urlencode(query)}"
+    return f"{base}{clean_path}"
+
+
+def _oauth_state_cookie_samesite() -> str:
+    # SameSite=Strict drops cookies on top-level cross-site OAuth redirects
+    configured = (settings.COOKIE_SAMESITE or "lax").strip().lower()
+    return "none" if configured == "none" else "lax"
+
+
+def _clear_oauth_state_cookie(response: Response) -> None:
+    delete_kwargs = {"path": "/api/v1/auth/oauth"}
+    if settings.COOKIE_DOMAIN:
+        delete_kwargs["domain"] = settings.COOKIE_DOMAIN
+    response.delete_cookie(key=settings.OAUTH_STATE_COOKIE_NAME, **delete_kwargs)
+
+
+def _oauth_error_redirect(error_code: str) -> RedirectResponse:
+    error_path = settings.OAUTH_FRONTEND_ERROR_PATH or "/login"
+    resp = RedirectResponse(
+        url=_frontend_redirect_url(error_path, {"oauth_error": error_code}),
+        status_code=status.HTTP_302_FOUND,
+    )
+    _clear_oauth_state_cookie(resp)
+    return resp
+
+
+@router.get("/oauth/providers", response_model=OAuthProvidersResponse)
+def list_oauth_providers():
+    """Return the list of currently enabled OAuth providers."""
+    providers = ["google"] if is_google_oauth_enabled() else []
+    return {"providers": providers}
+
+
+@router.get(
+    "/oauth/google/login",
+    dependencies=[Depends(rate_limit_auth("oauth_login"))],
+)
+def google_oauth_login(
+    request: Request,
+    next: Optional[str] = Query(default=None, description="Optional safe relative path to redirect to after login"),
+):
+    """Start Google OAuth 2.0 login/registration using Authorization Code + PKCE."""
+    if not is_google_oauth_enabled():
+        raise api_error(
+            503,
+            "OAUTH_PROVIDER_DISABLED",
+            "Google OAuth is not configured on this server.",
+        )
+
+    safe_next = sanitize_next_path(next)
+    state = secrets.token_urlsafe(32)
+    code_verifier, code_challenge = generate_pkce_pair()
+    state_jwt = create_oauth_state_token(
+        provider="google",
+        state=state,
+        code_verifier=code_verifier,
+        next_path=safe_next,
+    )
+
+    redirect_uri = _google_redirect_uri(request)
+    auth_url = build_google_authorization_url(
+        redirect_uri=redirect_uri,
+        state=state,
+        code_challenge=code_challenge,
+    )
+
+    response = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
+    cookie_kwargs = {
+        "httponly": True,
+        "secure": settings.COOKIE_SECURE,
+        "samesite": _oauth_state_cookie_samesite(),
+        "max_age": settings.OAUTH_STATE_EXPIRE_SECONDS,
+        "path": "/api/v1/auth/oauth",
+    }
+    if settings.COOKIE_DOMAIN:
+        cookie_kwargs["domain"] = settings.COOKIE_DOMAIN
+    response.set_cookie(key=settings.OAUTH_STATE_COOKIE_NAME, value=state_jwt, **cookie_kwargs)
+    return response
+
+
+@router.get(
+    "/oauth/google/callback",
+    dependencies=[Depends(rate_limit_auth("oauth_callback"))],
+)
+def google_oauth_callback(
+    request: Request,
+    code: Optional[str] = Query(default=None),
+    state: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Handle Google OAuth callback, auto-link or auto-register user, and set auth cookies."""
+    if not is_google_oauth_enabled():
+        return _oauth_error_redirect("OAUTH_PROVIDER_DISABLED")
+
+    if error:
+        if error == "access_denied":
+            return _oauth_error_redirect("OAUTH_CANCELLED")
+        return _oauth_error_redirect("OAUTH_PROVIDER_ERROR")
+
+    state_cookie = request.cookies.get(settings.OAUTH_STATE_COOKIE_NAME)
+    if not state_cookie or not state or not code:
+        return _oauth_error_redirect("OAUTH_INVALID_STATE")
+
+    state_payload = decode_oauth_state_token(state_cookie)
+    if (
+        not state_payload
+        or state_payload.get("provider") != "google"
+        or not isinstance(state_payload.get("state"), str)
+        or not secrets.compare_digest(state_payload["state"], state)
+        or not isinstance(state_payload.get("code_verifier"), str)
+    ):
+        return _oauth_error_redirect("OAUTH_INVALID_STATE")
+
+    redirect_uri = _google_redirect_uri(request)
+    try:
+        info = exchange_google_code_for_userinfo(
+            code=code,
+            redirect_uri=redirect_uri,
+            code_verifier=state_payload["code_verifier"],
+        )
+    except OAuthProviderError as exc:
+        return _oauth_error_redirect(exc.code)
+
+    now = datetime.now(timezone.utc)
+    oauth_acct = (
+        db.query(OAuthAccount)
+        .filter(
+            OAuthAccount.provider == "google",
+            OAuthAccount.provider_user_id == info.provider_user_id,
+        )
+        .first()
+    )
+
+    if oauth_acct is not None:
+        user = db.query(User).filter(User.id == oauth_acct.user_id).first()
+        if not user:
+            return _oauth_error_redirect("OAUTH_ACCOUNT_ERROR")
+        if not user.is_active:
+            return _oauth_error_redirect("ACCOUNT_DISABLED")
+        if info.email and oauth_acct.provider_email != info.email:
+            oauth_acct.provider_email = info.email
+        if info.avatar_url and not user.avatar_url:
+            user.avatar_url = info.avatar_url
+        if user.email_verified_at is None and info.email_verified:
+            user.email_verified_at = now
+        db.commit()
+        db.refresh(user)
+    else:
+        if not info.email or not info.email_verified:
+            return _oauth_error_redirect("OAUTH_EMAIL_NOT_VERIFIED")
+
+        user = db.query(User).filter(User.email == info.email).first()
+        if user is not None:
+            if not user.is_active:
+                return _oauth_error_redirect("ACCOUNT_DISABLED")
+            if user.email_verified_at is None:
+                user.email_verified_at = now
+            if info.avatar_url and not user.avatar_url:
+                user.avatar_url = info.avatar_url
+        else:
+            user = User(
+                email=info.email,
+                password_hash=None,
+                display_name=info.display_name,
+                avatar_url=info.avatar_url,
+                role="user",
+                is_active=True,
+                email_verified_at=now,
+            )
+            db.add(user)
+            db.flush()
+
+        db.add(
+            OAuthAccount(
+                user_id=user.id,
+                provider="google",
+                provider_user_id=info.provider_user_id,
+                provider_email=info.email,
+            )
+        )
+        db.commit()
+        db.refresh(user)
+
+    next_path = sanitize_next_path(state_payload.get("next"))
+    response = RedirectResponse(
+        url=_frontend_redirect_url(next_path),
+        status_code=status.HTTP_302_FOUND,
+    )
+    _clear_oauth_state_cookie(response)
+    set_auth_cookies(response, user_id=user.id, role=user.role)
+    return response
+
+
+@router.delete("/oauth/google", response_model=MessageResponse)
+def unlink_google_oauth(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Unlink Google OAuth from the current user's account (requires a password to remain)."""
+    oauth_acct = (
+        db.query(OAuthAccount)
+        .filter(
+            OAuthAccount.user_id == current_user.id,
+            OAuthAccount.provider == "google",
+        )
+        .first()
+    )
+    if not oauth_acct:
+        raise api_error(404, "OAUTH_NOT_LINKED", "Google account is not linked.")
+
+    other_providers = (
+        db.query(OAuthAccount)
+        .filter(
+            OAuthAccount.user_id == current_user.id,
+            OAuthAccount.provider != "google",
+        )
+        .count()
+    )
+    if not current_user.password_hash and other_providers == 0:
+        raise api_error(
+            400,
+            "CANNOT_UNLINK_LAST_AUTH_METHOD",
+            "Set a password before unlinking your Google account.",
+        )
+
+    db.delete(oauth_acct)
+    db.commit()
+    return {"message": "Google account unlinked successfully."}

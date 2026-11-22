@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = "lax"
     COOKIE_DOMAIN: Optional[str] = None
 
+    # Google OAuth settings
+    OAUTH_REDIRECT_BASE_URL: Optional[str] = None
+    OAUTH_FRONTEND_SUCCESS_PATH: str = "/"
+    OAUTH_FRONTEND_ERROR_PATH: str = "/login"
+    OAUTH_STATE_COOKIE_NAME: str = "qc_oauth_state"
+    OAUTH_STATE_EXPIRE_SECONDS: int = 600
+    OAUTH_HTTP_TIMEOUT_SECONDS: int = 10
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    GOOGLE_CLIENT_SECRET: Optional[str] = None
+
     # Initial admin seed
     ADMIN_EMAIL: Optional[str] = None
     ADMIN_PASSWORD: Optional[str] = None

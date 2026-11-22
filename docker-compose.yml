@@ -26,6 +26,8 @@ services:
         condition: service_healthy
     ports:
       - "${API_PORT:-8000}:8000"
+    env_file:
+      - .env
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-quizclash}:${POSTGRES_PASSWORD:-quizclash}@db:5432/${POSTGRES_DB:-quizclash}
@@ -34,6 +36,11 @@ services:
       SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-key-change-in-production}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:-http://localhost:8000}
+      OAUTH_FRONTEND_SUCCESS_PATH: ${OAUTH_FRONTEND_SUCCESS_PATH:-/}
+      OAUTH_FRONTEND_ERROR_PATH: ${OAUTH_FRONTEND_ERROR_PATH:-/login}
     volumes:
       - .:/app
     command: >

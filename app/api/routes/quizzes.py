@@ -418,6 +418,31 @@ def update_quiz(
     return format_quiz_response(db_quiz, include_correct=True)
 
 
+@router.delete("/quizzes/{quiz_id}")
+def delete_quiz(
+    quiz_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a quiz owned by the authenticated user (or any quiz for admin)."""
+    numeric_id = parse_prefixed_id(
+        quiz_id,
+        "quiz",
+        status_code=404,
+        detail="Quiz not found.",
+        code="QUIZ_NOT_FOUND",
+    )
+
+    db_quiz = db.query(Quiz).filter(Quiz.id == numeric_id).first()
+    if not db_quiz:
+        raise api_error(404, "QUIZ_NOT_FOUND", "Quiz not found.")
+
+    ensure_owner_or_admin(db_quiz.owner_id, current_user)
+    db.delete(db_quiz)
+    db.commit()
+    return {"message": "Quiz deleted."}
+
+
 def format_quiz_response(db_quiz: Quiz, include_correct: bool = False) -> dict:
     """Format database quiz for API response"""
     sorted_questions = sorted(db_quiz.questions, key=lambda q: q.position)

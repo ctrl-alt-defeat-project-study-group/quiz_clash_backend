@@ -101,6 +101,10 @@ Auth column: 🌐 public · 🔐 logged-in user · 👑 admin · 🌐/🔐 optio
 | | `GET /auth/me` | 🔐 | `UserProfile` |
 | | `POST /auth/forgot-password` | 🌐 | `Message` |
 | | `POST /auth/reset-password` | 🌐 | `Message` |
+| | `GET /auth/oauth/providers` | 🌐 | `{providers: string[]}` |
+| | `GET /auth/oauth/google/login?next=` | 🌐 | `302` redirect to Google |
+| | `GET /auth/oauth/google/callback` | 🌐 | `302` redirect to frontend + sets cookies |
+| | `DELETE /auth/oauth/google` | 🔐 | `Message` (unlink Google) |
 | Quizzes | `GET /quizzes` | 🔐 | `QuizSummary[]` |
 | | `POST /quizzes` (multipart) | 🔐 | `Quiz` (201) |
 | | `GET /quizzes/{id}` | 🔐 | `Quiz` (**no** answers) |
@@ -136,8 +140,11 @@ type Lang = "en" | "mm";
 
 interface UserProfile {
   id: number; email: string; display_name: string;
+  avatar_url: string | null;
   role: "user" | "admin"; is_active: boolean;
   email_verified_at: string | null;           // ISO datetime
+  has_password: boolean;
+  oauth_providers: string[];                  // e.g. ["google"]
 }
 interface Message { message: string }
 
@@ -225,6 +232,19 @@ const me = await api<UserProfile>("/auth/login", { method: "POST",
 
 // Restore session on page load
 const me2 = await api<UserProfile>("/auth/me");      // 401 => show login
+
+// Google OAuth (full-page redirect; auto-registers or auto-links verified email)
+const { providers } = await api<{ providers: string[] }>("/auth/oauth/providers");
+if (providers.includes("google")) {
+  // On "Continue with Google" button click:
+  window.location.href = `${API}/auth/oauth/google/login?next=/`;
+}
+// On failure, backend redirects to `${APP_BASE_URL}/login?oauth_error=<CODE>`
+// Possible oauth_error codes: OAUTH_CANCELLED, OAUTH_INVALID_STATE,
+// OAUTH_EMAIL_NOT_VERIFIED, ACCOUNT_DISABLED, OAUTH_PROVIDER_ERROR
+
+// Unlink Google (only allowed when user also has a password set)
+await api("/auth/oauth/google", { method: "DELETE" });
 
 await api("/auth/logout", { method: "POST" });
 ```

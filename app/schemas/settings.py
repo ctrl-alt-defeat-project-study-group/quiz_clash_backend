@@ -10,11 +10,22 @@ from app.core.language import normalize_language
 ThemeType = Literal["light", "dark", "system"]
 DifficultyType = Literal["Mixed", "Foundational", "Advanced"]
 ALLOWED_DEFAULT_QUESTIONS = (5, 10, 15, 20)
+ALLOWED_PRESET_AVATARS = (
+    "preset:scholar",
+    "preset:fox",
+    "preset:owl",
+    "preset:astronaut",
+    "preset:cat",
+    "preset:robot",
+    "preset:panda",
+    "preset:wizard",
+)
 
 
 class UserSettingsResponse(BaseModel):
     display_name: str
     email: str
+    avatar_url: Optional[str] = None
     theme: str
     ui_language: str
     default_questions: int
@@ -28,6 +39,7 @@ class UserSettingsResponse(BaseModel):
 
 class UserSettingsUpdate(BaseModel):
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    avatar_url: Optional[str] = Field(default=None, max_length=64)
     theme: Optional[ThemeType] = None
     ui_language: Optional[str] = None
     default_questions: Optional[int] = None
@@ -37,6 +49,20 @@ class UserSettingsUpdate(BaseModel):
     show_explanations: Optional[bool] = None
     study_reminders: Optional[bool] = None
     weekly_summary: Optional[bool] = None
+
+    @field_validator("avatar_url")
+    @classmethod
+    def validate_avatar_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if cleaned == "":
+            return None
+        if cleaned not in ALLOWED_PRESET_AVATARS:
+            raise ValueError(
+                f"avatar_url must be one of the preset avatars: {', '.join(ALLOWED_PRESET_AVATARS)}."
+            )
+        return cleaned
 
     @field_validator("ui_language")
     @classmethod

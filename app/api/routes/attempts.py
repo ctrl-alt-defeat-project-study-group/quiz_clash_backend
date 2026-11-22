@@ -325,6 +325,44 @@ def get_attempt(
     }
 
 
+@router.delete("/attempts/{attempt_id}")
+def delete_attempt(
+    attempt_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a single quiz attempt owned by the authenticated user (or admin)."""
+    attempt_numeric_id = parse_prefixed_id(
+        attempt_id,
+        ("att", "attempt"),
+        status_code=404,
+        detail="Attempt not found.",
+        code="ATTEMPT_NOT_FOUND",
+    )
+
+    db_attempt = db.query(Attempt).filter(Attempt.id == attempt_numeric_id).first()
+    if not db_attempt:
+        raise api_error(404, "ATTEMPT_NOT_FOUND", "Attempt not found.")
+
+    ensure_owner_or_admin(db_attempt.user_id, current_user)
+    db.delete(db_attempt)
+    db.commit()
+    return {"message": "Attempt deleted."}
+
+
+@router.delete("/attempts")
+def clear_attempts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete all quiz attempts belonging to the authenticated user."""
+    attempts = db.query(Attempt).filter(Attempt.user_id == current_user.id).all()
+    for att in attempts:
+        db.delete(att)
+    db.commit()
+    return {"message": "Attempt history cleared."}
+
+
 def get_choice_letter(choices: List[Choice], target_choice_id: int) -> str:
     """Get choice letter (a, b, c, d) from database choice ID"""
     sorted_choices = sorted(choices, key=lambda c: c.position)

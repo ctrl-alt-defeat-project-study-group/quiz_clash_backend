@@ -2,9 +2,10 @@
 Password hashing (Argon2), JWT token creation/verification, email token helpers, and cookie utils.
 """
 from datetime import datetime, timedelta, timezone
+import base64
 import hashlib
 import secrets
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
@@ -38,8 +39,10 @@ def hash_password(password: str) -> str:
     return _password_hasher.hash(password)
 
 
-def verify_password(plain_password: str, password_hash: str) -> bool:
+def verify_password(plain_password: str, password_hash: Optional[str]) -> bool:
     """Verify a plaintext password against an Argon2 hash."""
+    if not password_hash:
+        return False
     try:
         return _password_hasher.verify(password_hash, plain_password)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
@@ -132,3 +135,46 @@ def generate_email_token() -> Tuple[str, str]:
 
 def hash_email_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def generate_pkce_pair() -> Tuple[str, str]:
+    """Generate a PKCE (code_verifier, code_challenge) pair using S256."""
+    code_verifier = secrets.token_urlsafe(48)
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return code_verifier, code_challenge
+
+
+def create_oauth_state_token(
+    provider: str,
+    state: str,
+    code_verifier: str,
+    next_path: str,
+) -> str:
+    """Create a short-lived signed JWT storing OAuth CSRF state and PKCE verifier."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "type": "oauth_state",
+        "provider": provider,
+        "state": state,
+        "code_verifier": code_verifier,
+        "next": next_path,
+        "iat": now,
+        "exp": now + timedelta(seconds=settings.OAUTH_STATE_EXPIRE_SECONDS),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
+def decode_oauth_state_token(token: str) -> Optional[Dict[str, Any]]:
+    """Decode and validate an OAuth state JWT; returns None on any error."""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+    except jwt.PyJWTError:
+        return None
+    if payload.get("type") != "oauth_state":
+        return None
+    return payload

@@ -1,7 +1,7 @@
 """
 SQLAlchemy database models
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.session import Base
@@ -12,8 +12,9 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=True)
     display_name = Column(String(100), nullable=False, default="User")
+    avatar_url = Column(String(500), nullable=True)
     role = Column(String(20), nullable=False, default="user")  # "user" | "admin"
     is_active = Column(Boolean, nullable=False, default=True)
     email_verified_at = Column(DateTime(timezone=True), nullable=True)
@@ -38,6 +39,12 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    oauth_accounts = relationship(
+        "OAuthAccount",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     settings = relationship(
         "UserSettings",
         back_populates="user",
@@ -51,6 +58,37 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    @property
+    def has_password(self) -> bool:
+        return bool(self.password_hash)
+
+    @property
+    def oauth_providers(self):
+        return sorted({acct.provider for acct in (self.oauth_accounts or [])})
+
+
+class OAuthAccount(Base):
+    __tablename__ = "oauth_accounts"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_oauth_provider_user"),
+        UniqueConstraint("user_id", "provider", name="uq_oauth_user_provider"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider = Column(String(32), nullable=False, index=True)  # "google"
+    provider_user_id = Column(String(255), nullable=False)
+    provider_email = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    user = relationship("User", back_populates="oauth_accounts")
 
 
 class EmailToken(Base):
@@ -250,9 +288,11 @@ class LiveRoom(Base):
         nullable=False,
         index=True,
     )
-    pin = Column(String(6), unique=True, index=True, nullable=False)
+    pin = Column(String(16), unique=True, index=True, nullable=False)
     timer_seconds = Column(Integer, nullable=False, default=20)
     status = Column(String(20), nullable=False, default="lobby")  # lobby, active, finished, closed
+    results_json = Column(Text, nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

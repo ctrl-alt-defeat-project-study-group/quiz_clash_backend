@@ -37,6 +37,7 @@ def _format_settings(user: User, s: UserSettings) -> dict:
     return {
         "display_name": user.display_name,
         "email": user.email,
+        "avatar_url": user.avatar_url,
         "theme": s.theme,
         "ui_language": s.ui_language,
         "default_questions": s.default_questions,
@@ -72,6 +73,9 @@ def update_settings(
         cleaned = payload.display_name.strip()
         if cleaned:
             current_user.display_name = cleaned
+
+    if "avatar_url" in payload.model_fields_set:
+        current_user.avatar_url = payload.avatar_url
 
     for field_name in (
         "theme",
