@@ -79,7 +79,11 @@ class Settings(BaseSettings):
     DEMO_USER_PASSWORD: Optional[str] = None
     DEMO_USER_DISPLAY_NAME: str = "Demo User"
 
-    # Optional SMTP settings (console mailer used when SMTP_HOST is unset)
+    # Optional Brevo Transactional Email HTTPS API (recommended on hosts like Render that block SMTP ports)
+    BREVO_API_KEY: Optional[str] = None
+    BREVO_FROM_NAME: str = "QuizClash"
+
+    # Optional SMTP settings (console mailer used when both BREVO_API_KEY and SMTP_HOST are unset)
     SMTP_HOST: Optional[str] = None
     SMTP_PORT: int = 587
     SMTP_USER: Optional[str] = None

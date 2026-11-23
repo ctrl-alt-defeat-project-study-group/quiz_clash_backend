@@ -127,10 +127,18 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         purpose="verify",
         expire_hours=settings.EMAIL_TOKEN_EXPIRE_HOURS,
     )
+    try:
+        MailerService.send_verification_email(user.email, user.display_name, raw_token)
+    except Exception:
+        db.rollback()
+        raise api_error(
+            503,
+            "EMAIL_DELIVERY_FAILED",
+            "Could not send verification email. Please try again later.",
+        )
+
     db.commit()
     db.refresh(user)
-
-    MailerService.send_verification_email(user.email, user.display_name, raw_token)
     return user
 
 
@@ -205,8 +213,16 @@ def resend_verification(payload: EmailRequest, db: Session = Depends(get_db)):
             purpose="verify",
             expire_hours=settings.EMAIL_TOKEN_EXPIRE_HOURS,
         )
+        try:
+            MailerService.send_verification_email(user.email, user.display_name, raw_token)
+        except Exception:
+            db.rollback()
+            raise api_error(
+                503,
+                "EMAIL_DELIVERY_FAILED",
+                "Could not send verification email. Please try again later.",
+            )
         db.commit()
-        MailerService.send_verification_email(user.email, user.display_name, raw_token)
 
     return {"message": "If the account exists and is unverified, a verification email has been sent."}
 
@@ -291,8 +307,16 @@ def forgot_password(payload: EmailRequest, db: Session = Depends(get_db)):
             purpose="reset",
             expire_hours=settings.PASSWORD_RESET_EXPIRE_HOURS,
         )
+        try:
+            MailerService.send_password_reset_email(user.email, user.display_name, raw_token)
+        except Exception:
+            db.rollback()
+            raise api_error(
+                503,
+                "EMAIL_DELIVERY_FAILED",
+                "Could not send password reset email. Please try again later.",
+            )
         db.commit()
-        MailerService.send_password_reset_email(user.email, user.display_name, raw_token)
 
     return {"message": "If an account with that email exists, a password reset link has been sent."}
 
