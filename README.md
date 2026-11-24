@@ -260,7 +260,27 @@ docker run -p 8000:8000 --env-file .env quizclash-api
 
 > **Production Safety Check:** On startup, `validate_production_settings()` fails fast if `ENVIRONMENT=production` is paired with insecure defaults (such as a weak `SECRET_KEY` or `COOKIE_SECURE=false`).
 
-### Creating an Admin Account in Production (Render / AWS / Docker)
+### Deploy to Render (Free Tier Blueprint)
+
+This repository includes a [`render.yaml`](./render.yaml) Blueprint configured for Render's **Free** tier using a Docker Web Service (`Dockerfile`) and a managed **Render PostgreSQL** database (`quizclash-db`).
+
+1. **Push this repository to GitHub**, then in the Render dashboard click **New → Blueprint** and select the repo.
+2. Render automatically provisions `quizclash-db`, injects `DATABASE_URL`, generates `SECRET_KEY`, and sets `ENVIRONMENT=production`, `COOKIE_SECURE=true`, and `COOKIE_SAMESITE=none` (required for cross-site cookies between your frontend and `*.onrender.com`).
+3. **Fill in the prompted environment variables / API keys:**
+   - `FRONTEND_ORIGINS` — Your frontend URL (e.g., `https://your-app.vercel.app`, comma-separated if multiple; no trailing slash).
+   - `APP_BASE_URL` — Your frontend base URL for email verification & password reset links.
+   - `BREVO_API_KEY` & `SMTP_FROM_EMAIL` — Your Brevo API key and verified sender email (Render Free blocks outbound SMTP ports, so emails are sent via Brevo's HTTPS API).
+   - `LLM_API_KEY` — Optional Gemini API key to enable AI quiz generation (`use_llm=true`).
+   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OAUTH_REDIRECT_BASE_URL` — Optional Google OAuth 2.0 credentials (set `OAUTH_REDIRECT_BASE_URL` to `https://<your-service>.onrender.com`).
+   - `ADMIN_EMAIL` & `ADMIN_PASSWORD` — Optional initial admin account seed (remove `ADMIN_PASSWORD` after verifying admin login).
+4. **Post-deploy updates:**
+   - Verify `GET https://<your-service>.onrender.com/api/v1/health` returns `{"status":"ok","service":"quiz-clash-api"}`.
+   - Point your frontend's API base URL to `https://<your-service>.onrender.com`.
+   - If using Google OAuth, add `https://<your-service>.onrender.com/api/v1/auth/oauth/google/callback` to Authorized Redirect URIs in Google Cloud Console.
+
+> **Render Free Tier Notes:** Free Web Services spin down after 15 minutes of inactivity (30–60s cold start on the next request), and Free PostgreSQL databases expire after 30 days unless upgraded.
+
+### Creating an Admin Account in Production (Render / Docker)
 
 There are three ways to provision an admin account in a deployed environment:
 

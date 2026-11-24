@@ -82,3 +82,38 @@ def test_database_url_normalization():
 
     s3 = Settings(DATABASE_URL="sqlite:///./dev.db")
     assert s3.DATABASE_URL == "sqlite:///./dev.db"
+
+
+def test_render_blueprint_configuration():
+    render_yaml = (ROOT_DIR / "render.yaml").read_text(encoding="utf-8")
+    assert "runtime: docker" in render_yaml
+    assert "dockerfilePath: ./Dockerfile" in render_yaml
+    assert "healthCheckPath: /api/v1/health" in render_yaml
+    assert "plan: free" in render_yaml
+    assert "ENVIRONMENT" in render_yaml and "production" in render_yaml
+    assert "COOKIE_SECURE" in render_yaml
+    assert "COOKIE_SAMESITE" in render_yaml and "none" in render_yaml
+    assert "fromDatabase:" in render_yaml
+    assert "BREVO_API_KEY" in render_yaml
+    assert "LLM_API_KEY" in render_yaml
+    assert not (ROOT_DIR / "docker-compose.prod.yml").exists()
+    assert not (ROOT_DIR / "Caddyfile").exists()
+
+
+def test_cross_site_cookie_clearing_preserves_security_attributes(monkeypatch):
+    from fastapi import Response
+    from app.core import security
+
+    monkeypatch.setattr(security.settings, "COOKIE_SECURE", True)
+    monkeypatch.setattr(security.settings, "COOKIE_SAMESITE", "none")
+
+    resp = Response()
+    security.clear_auth_cookies(resp)
+    security.clear_pending_registration_cookie(resp)
+
+    set_cookies = [v.decode("latin-1").lower() for k, v in resp.raw_headers if k.lower() == b"set-cookie"]
+    assert len(set_cookies) == 3
+    for header in set_cookies:
+        assert "secure" in header
+        assert "samesite=none" in header
+        assert "httponly" in header

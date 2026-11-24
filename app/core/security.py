@@ -119,7 +119,12 @@ def set_auth_cookies(response: Response, user_id: int, role: str) -> None:
 
 def clear_auth_cookies(response: Response) -> None:
     """Clear auth cookies from the client."""
-    delete_kwargs: Dict[str, Any] = {"path": "/"}
+    delete_kwargs: Dict[str, Any] = {
+        "path": "/",
+        "httponly": True,
+        "secure": settings.COOKIE_SECURE,
+        "samesite": settings.COOKIE_SAMESITE,
+    }
     if settings.COOKIE_DOMAIN:
         delete_kwargs["domain"] = settings.COOKIE_DOMAIN
 
@@ -192,7 +197,12 @@ def set_pending_registration_cookie(response: Response, token: str) -> None:
 
 def clear_pending_registration_cookie(response: Response) -> None:
     """Clear the pending registration cookie from the client."""
-    delete_kwargs: Dict[str, Any] = {"path": "/"}
+    delete_kwargs: Dict[str, Any] = {
+        "path": "/",
+        "httponly": True,
+        "secure": settings.COOKIE_SECURE,
+        "samesite": settings.COOKIE_SAMESITE,
+    }
     if settings.COOKIE_DOMAIN:
         delete_kwargs["domain"] = settings.COOKIE_DOMAIN
 
