@@ -260,6 +260,34 @@ docker run -p 8000:8000 --env-file .env quizclash-api
 
 > **Production Safety Check:** On startup, `validate_production_settings()` fails fast if `ENVIRONMENT=production` is paired with insecure defaults (such as a weak `SECRET_KEY` or `COOKIE_SECURE=false`).
 
+### Creating an Admin Account in Production (Render / AWS / Docker)
+
+There are three ways to provision an admin account in a deployed environment:
+
+1. **Environment Variables on Startup (works on Render Free/Paid, AWS, Docker):**
+   - **New admin account:** Set `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and optionally `ADMIN_DISPLAY_NAME` in your host's environment variables, then deploy/restart.
+   - **Promote an existing user (including Google OAuth accounts):** Set `ADMIN_EMAIL` (no `ADMIN_PASSWORD` needed) and redeploy/restart. The existing account is promoted to `admin`, activated, and verified without changing its password.
+   - **Security tip:** After verifying you can log in and access `/api/v1/admin/stats`, remove `ADMIN_PASSWORD` (and optionally `ADMIN_EMAIL`) from your environment variables.
+
+2. **Admin CLI Tool (works on AWS EC2/Docker, Render Paid Shell, or locally — no password in env vars):**
+   ```bash
+   # Create a new admin (prompts securely for password if --password is omitted)
+   python -m app.cli create-admin --email admin@example.com --display-name "Admin"
+
+   # Promote an existing user (e.g. Google OAuth or registered user) to admin
+   python -m app.cli promote-admin --email user@example.com
+
+   # List all current admin accounts
+   python -m app.cli list-admins
+   ```
+   On Docker / AWS EC2 with Docker Compose:
+   ```bash
+   docker compose exec api python -m app.cli create-admin --email admin@example.com
+   ```
+
+3. **Promote Additional Admins via API:**
+   Once logged in as an admin, promote any other user with `PATCH /api/v1/admin/users/{user_id}` and body `{"role": "admin"}`.
+
 ---
 
 ## 📄 License
