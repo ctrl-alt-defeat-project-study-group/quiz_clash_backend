@@ -16,8 +16,11 @@ from app.core.rate_limit import rate_limit_auth
 from app.core.security import (
     api_error,
     clear_auth_cookies,
+    clear_pending_registration_cookie,
     create_oauth_state_token,
+    create_pending_registration_token,
     decode_oauth_state_token,
+    decode_pending_registration_token,
     decode_token,
     generate_email_otp,
     generate_email_token,
@@ -25,6 +28,7 @@ from app.core.security import (
     hash_email_token,
     hash_password,
     set_auth_cookies,
+    set_pending_registration_cookie,
     validate_password_strength,
     verify_password,
 )
@@ -36,6 +40,7 @@ from app.schemas.auth import (
     LoginRequest,
     MessageResponse,
     OAuthProvidersResponse,
+    RegisterPendingResponse,
     RegisterRequest,
     ResetPasswordRequest,
     UserProfileResponse,
@@ -93,12 +98,16 @@ def _issue_email_token(
 
 @router.post(
     "/register",
-    response_model=UserProfileResponse,
-    status_code=status.HTTP_201_CREATED,
+    response_model=RegisterPendingResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(rate_limit_auth("register"))],
 )
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    """Open sign-up: always creates an unverified 'user' and sends a verification email."""
+def register(
+    payload: RegisterRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Open sign-up: emails a 6-digit OTP and stores pending registration in a signed httpOnly cookie."""
     email = payload.email.strip().lower()
     display_name = payload.display_name.strip()
     if not display_name:
@@ -110,36 +119,32 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     if existing:
         raise api_error(409, "EMAIL_ALREADY_EXISTS", "An account with this email already exists.")
 
-    user = User(
-        email=email,
-        password_hash=hash_password(payload.password),
-        display_name=display_name,
-        role="user",
-        is_active=True,
-        email_verified_at=None,
-    )
-    db.add(user)
-    db.flush()
+    password_hash = hash_password(payload.password)
+    raw_otp, otp_hash = generate_email_otp()
 
-    raw_token = _issue_email_token(
-        db,
-        user=user,
-        purpose="verify",
-        expire_hours=settings.EMAIL_TOKEN_EXPIRE_HOURS,
-    )
     try:
-        MailerService.send_verification_email(user.email, user.display_name, raw_token)
+        MailerService.send_verification_email(email, display_name, raw_otp)
     except Exception:
-        db.rollback()
         raise api_error(
             503,
             "EMAIL_DELIVERY_FAILED",
             "Could not send verification email. Please try again later.",
         )
 
-    db.commit()
-    db.refresh(user)
-    return user
+    pending_token = create_pending_registration_token(
+        email=email,
+        display_name=display_name,
+        password_hash=password_hash,
+        otp_hash=otp_hash,
+    )
+    set_pending_registration_cookie(response, pending_token)
+
+    return RegisterPendingResponse(
+        message="Verification code sent. Please check your email to complete registration.",
+        email=email,
+        display_name=display_name,
+        verification_required=True,
+    )
 
 
 @router.post(
@@ -147,9 +152,61 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     response_model=MessageResponse,
     dependencies=[Depends(rate_limit_auth("verify_email"))],
 )
-def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
+def verify_email(
+    payload: VerifyEmailRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     """Verify a user's email address using a one-time 6-digit OTP code."""
     token_hash = hash_email_token(payload.token.strip())
+    now = datetime.now(timezone.utc)
+
+    # 1. Check deferred registration cookie first
+    pending_cookie = request.cookies.get(settings.PENDING_REG_COOKIE_NAME)
+    if pending_cookie:
+        claims = decode_pending_registration_token(pending_cookie)
+        if claims is not None:
+            pending_email = claims["email"].strip().lower()
+            if payload.email and payload.email.strip().lower() != pending_email:
+                raise api_error(
+                    400,
+                    "TOKEN_INVALID_OR_EXPIRED",
+                    "Verification code is invalid or has expired.",
+                )
+            if not secrets.compare_digest(token_hash, claims["otp_hash"]):
+                raise api_error(
+                    400,
+                    "TOKEN_INVALID_OR_EXPIRED",
+                    "Verification code is invalid or has expired.",
+                )
+
+            existing = db.query(User).filter(User.email == pending_email).first()
+            if existing:
+                clear_pending_registration_cookie(response)
+                raise api_error(
+                    409,
+                    "EMAIL_ALREADY_EXISTS",
+                    "An account with this email already exists.",
+                )
+
+            user = User(
+                email=pending_email,
+                password_hash=claims["password_hash"],
+                display_name=claims["display_name"],
+                role="user",
+                is_active=True,
+                email_verified_at=now,
+            )
+            db.add(user)
+            db.commit()
+            clear_pending_registration_cookie(response)
+            return {"message": "Email verified successfully."}
+
+        # Stale/expired pending cookie: clear it before falling back
+        clear_pending_registration_cookie(response)
+
+    # 2. Fallback for legacy unverified User rows with EmailToken records
     query = db.query(EmailToken).filter(
         EmailToken.token_hash == token_hash,
         EmailToken.purpose == "verify",
@@ -168,7 +225,6 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
 
     db_token = query.first()
 
-    now = datetime.now(timezone.utc)
     if (
         not db_token
         or db_token.used_at is not None
@@ -201,9 +257,45 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
     response_model=MessageResponse,
     dependencies=[Depends(rate_limit_auth("resend_verification"))],
 )
-def resend_verification(payload: EmailRequest, db: Session = Depends(get_db)):
-    """Resend verification email if the account exists and is not yet verified."""
+def resend_verification(
+    payload: EmailRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Resend verification email for a pending registration or legacy unverified account."""
     email = payload.email.strip().lower()
+
+    # 1. Check deferred registration cookie first
+    pending_cookie = request.cookies.get(settings.PENDING_REG_COOKIE_NAME)
+    if pending_cookie:
+        claims = decode_pending_registration_token(pending_cookie)
+        if claims is not None and claims["email"].strip().lower() == email:
+            existing = db.query(User).filter(User.email == email).first()
+            if not existing:
+                raw_otp, otp_hash = generate_email_otp()
+                try:
+                    MailerService.send_verification_email(
+                        email, claims["display_name"], raw_otp
+                    )
+                except Exception:
+                    raise api_error(
+                        503,
+                        "EMAIL_DELIVERY_FAILED",
+                        "Could not send verification email. Please try again later.",
+                    )
+                refreshed_token = create_pending_registration_token(
+                    email=email,
+                    display_name=claims["display_name"],
+                    password_hash=claims["password_hash"],
+                    otp_hash=otp_hash,
+                )
+                set_pending_registration_cookie(response, refreshed_token)
+                return {
+                    "message": "If the account exists and is unverified, a verification email has been sent."
+                }
+
+    # 2. Fallback for legacy unverified User rows
     user = db.query(User).filter(User.email == email).first()
 
     if user and user.is_active and user.email_verified_at is None:
@@ -237,11 +329,21 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
     email = payload.email.strip().lower()
     user = db.query(User).filter(User.email == email).first()
 
-    if not user or not user.password_hash or not verify_password(payload.password, user.password_hash):
+    if not user:
         raise api_error(401, "INVALID_CREDENTIALS", "Invalid email or password.")
 
     if not user.is_active:
         raise api_error(403, "ACCOUNT_DISABLED", "This account has been deactivated.")
+
+    if not user.password_hash:
+        raise api_error(
+            401,
+            "OAUTH_ACCOUNT_USE_GOOGLE",
+            "This account uses Google Sign-In. Please continue with Google.",
+        )
+
+    if not verify_password(payload.password, user.password_hash):
+        raise api_error(401, "INVALID_CREDENTIALS", "Invalid email or password.")
 
     if user.email_verified_at is None:
         raise api_error(403, "EMAIL_NOT_VERIFIED", "Please verify your email address before logging in.")

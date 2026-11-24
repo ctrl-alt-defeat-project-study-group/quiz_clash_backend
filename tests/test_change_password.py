@@ -161,24 +161,39 @@ def test_register_sends_6_digit_otp_and_verifies_with_email():
                     "display_name": "OTP User",
                 },
             )
-            assert reg.status_code == 201
+            assert reg.status_code == 202
             assert len(captured) == 1
             otp = captured[0]
             assert len(otp) == 6 and otp.isdigit()
 
-            # Wrong email with valid OTP must fail
+            # User row must NOT exist in DB before OTP verification
+            db = SessionLocal()
+            try:
+                assert db.query(User).filter(User.email == "otpuser@example.com").first() is None
+            finally:
+                db.close()
+
+            # Wrong email with valid OTP must fail and not create User
             wrong_email = client.post(
                 "/api/v1/auth/verify-email",
                 json={"email": "someoneelse@example.com", "token": otp},
             )
             assert wrong_email.status_code == 400
 
-            # Correct email + 6-digit OTP succeeds
+            # Correct email + 6-digit OTP succeeds and creates verified User
             ok = client.post(
                 "/api/v1/auth/verify-email",
                 json={"email": "otpuser@example.com", "token": otp},
             )
             assert ok.status_code == 200
+
+            db = SessionLocal()
+            try:
+                created = db.query(User).filter(User.email == "otpuser@example.com").first()
+                assert created is not None
+                assert created.email_verified_at is not None
+            finally:
+                db.close()
 
             # Now login works
             login_res = client.post(

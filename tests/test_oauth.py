@@ -127,13 +127,13 @@ def test_google_callback_auto_registers_new_user_and_sets_cookies():
         assert body["has_password"] is False
         assert body["oauth_providers"] == ["google"]
 
-        # Password login for Google-only user must return 401 (never 500)
+        # Password login for Google-only user must return 401 OAUTH_ACCOUNT_USE_GOOGLE (never 500)
         pw_login = client.post(
             "/api/v1/auth/login",
             json={"email": "alice@gmail.com", "password": "SomePassword123"},
         )
         assert pw_login.status_code == 401
-        assert pw_login.json()["detail"]["code"] == "INVALID_CREDENTIALS"
+        assert pw_login.json()["detail"]["code"] == "OAUTH_ACCOUNT_USE_GOOGLE"
 
 
 def test_google_callback_returning_user_does_not_duplicate():

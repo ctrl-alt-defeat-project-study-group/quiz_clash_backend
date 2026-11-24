@@ -13,6 +13,13 @@ class RegisterRequest(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=100)
 
 
+class RegisterPendingResponse(BaseModel):
+    message: str
+    email: EmailStr
+    display_name: str
+    verification_required: bool = True
+
+
 class VerifyEmailRequest(BaseModel):
     token: str = Field(..., min_length=1, max_length=128)
     email: Optional[EmailStr] = None

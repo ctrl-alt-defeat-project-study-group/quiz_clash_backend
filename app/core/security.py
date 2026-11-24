@@ -127,6 +127,78 @@ def clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(key=settings.REFRESH_COOKIE_NAME, **delete_kwargs)
 
 
+def create_pending_registration_token(
+    email: str,
+    display_name: str,
+    password_hash: str,
+    otp_hash: str,
+    expires_minutes: Optional[int] = None,
+) -> str:
+    """Create a short-lived signed JWT holding a pending (unverified) registration."""
+    now = datetime.now(timezone.utc)
+    ttl_minutes = (
+        expires_minutes
+        if expires_minutes is not None
+        else settings.PENDING_REG_EXPIRE_MINUTES
+    )
+    payload = {
+        "type": "pending_registration",
+        "email": email,
+        "display_name": display_name,
+        "password_hash": password_hash,
+        "otp_hash": otp_hash,
+        "iat": now,
+        "exp": now + timedelta(minutes=ttl_minutes),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
+def decode_pending_registration_token(token: str) -> Optional[Dict[str, Any]]:
+    """Decode and validate a pending registration JWT; returns None on any error."""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+    except jwt.PyJWTError:
+        return None
+    if payload.get("type") != "pending_registration":
+        return None
+    required_keys = ("email", "display_name", "password_hash", "otp_hash")
+    if not all(isinstance(payload.get(k), str) and payload.get(k) for k in required_keys):
+        return None
+    return payload
+
+
+def set_pending_registration_cookie(response: Response, token: str) -> None:
+    """Attach httpOnly pending registration cookie to a response."""
+    cookie_kwargs: Dict[str, Any] = {
+        "httponly": True,
+        "secure": settings.COOKIE_SECURE,
+        "samesite": settings.COOKIE_SAMESITE,
+        "path": "/",
+    }
+    if settings.COOKIE_DOMAIN:
+        cookie_kwargs["domain"] = settings.COOKIE_DOMAIN
+
+    response.set_cookie(
+        key=settings.PENDING_REG_COOKIE_NAME,
+        value=token,
+        max_age=settings.PENDING_REG_EXPIRE_MINUTES * 60,
+        **cookie_kwargs,
+    )
+
+
+def clear_pending_registration_cookie(response: Response) -> None:
+    """Clear the pending registration cookie from the client."""
+    delete_kwargs: Dict[str, Any] = {"path": "/"}
+    if settings.COOKIE_DOMAIN:
+        delete_kwargs["domain"] = settings.COOKIE_DOMAIN
+
+    response.delete_cookie(key=settings.PENDING_REG_COOKIE_NAME, **delete_kwargs)
+
+
 def generate_email_token() -> Tuple[str, str]:
     """Return (raw_token, sha256_hash) for one-time email verification or password reset."""
     raw = secrets.token_urlsafe(32)

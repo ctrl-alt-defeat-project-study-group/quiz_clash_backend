@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     # Cookie settings
     ACCESS_COOKIE_NAME: str = "qc_access_token"
     REFRESH_COOKIE_NAME: str = "qc_refresh_token"
+    PENDING_REG_COOKIE_NAME: str = "qc_pending_reg"
+    PENDING_REG_EXPIRE_MINUTES: int = 15
     COOKIE_SECURE: bool = False
     COOKIE_SAMESITE: str = "lax"
     COOKIE_DOMAIN: Optional[str] = None

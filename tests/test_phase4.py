@@ -69,18 +69,75 @@ def test_register_verify_login_refresh_logout_flow():
             assert weak.status_code == 422
             assert weak.json()["detail"]["code"] == "VALIDATION_ERROR"
 
-            # Register creates unverified 'user'
+            # Register defers User creation until OTP verification (202 + httpOnly cookie)
             reg = client.post(
                 "/api/v1/auth/register",
                 json={"email": "alice@example.com", "password": "Password123", "display_name": "Alice"},
             )
-            assert reg.status_code == 201
+            assert reg.status_code == 202
             body = reg.json()
-            assert body["role"] == "user"
-            assert body["email_verified_at"] is None
+            assert body["email"] == "alice@example.com"
+            assert body["display_name"] == "Alice"
+            assert body["verification_required"] is True
+            assert settings.PENDING_REG_COOKIE_NAME in reg.cookies
             assert len(captured_tokens) == 1
 
-            # Duplicate email returns 409 EMAIL_ALREADY_EXISTS
+            # Zero User rows written to DB before OTP verification
+            db = SessionLocal()
+            try:
+                assert db.query(User).filter(User.email == "alice@example.com").first() is None
+            finally:
+                db.close()
+
+            # Re-registering before verification succeeds (does not block with 409)
+            rereg = client.post(
+                "/api/v1/auth/register",
+                json={"email": "ALICE@example.com", "password": "Password123", "display_name": "Alice"},
+            )
+            assert rereg.status_code == 202
+            assert len(captured_tokens) == 2
+
+            # Login fails before verification (no User row exists yet)
+            unverified_login = client.post(
+                "/api/v1/auth/login",
+                json={"email": "alice@example.com", "password": "Password123"},
+            )
+            assert unverified_login.status_code == 401
+            assert unverified_login.json()["detail"]["code"] == "INVALID_CREDENTIALS"
+
+            # Resend verification rotates the pending OTP in cookie and invalidates prior OTP
+            resend = client.post(
+                "/api/v1/auth/resend-verification",
+                json={"email": "alice@example.com"},
+            )
+            assert resend.status_code == 200
+            assert len(captured_tokens) == 3
+
+            # Previous token is now invalid and does not create a User row
+            old_verify = client.post("/api/v1/auth/verify-email", json={"token": captured_tokens[1]})
+            assert old_verify.status_code == 400
+            assert old_verify.json()["detail"]["code"] == "TOKEN_INVALID_OR_EXPIRED"
+
+            db = SessionLocal()
+            try:
+                assert db.query(User).filter(User.email == "alice@example.com").first() is None
+            finally:
+                db.close()
+
+            # Latest token verifies email and inserts verified User row
+            verify = client.post("/api/v1/auth/verify-email", json={"token": captured_tokens[2]})
+            assert verify.status_code == 200
+
+            db = SessionLocal()
+            try:
+                created_user = db.query(User).filter(User.email == "alice@example.com").first()
+                assert created_user is not None
+                assert created_user.role == "user"
+                assert created_user.email_verified_at is not None
+            finally:
+                db.close()
+
+            # Duplicate email AFTER verification returns 409 EMAIL_ALREADY_EXISTS
             dup = client.post(
                 "/api/v1/auth/register",
                 json={"email": "ALICE@example.com", "password": "Password123", "display_name": "Alice2"},
@@ -88,33 +145,8 @@ def test_register_verify_login_refresh_logout_flow():
             assert dup.status_code == 409
             assert dup.json()["detail"]["code"] == "EMAIL_ALREADY_EXISTS"
 
-            # Login blocked before verification
-            unverified_login = client.post(
-                "/api/v1/auth/login",
-                json={"email": "alice@example.com", "password": "Password123"},
-            )
-            assert unverified_login.status_code == 403
-            assert unverified_login.json()["detail"]["code"] == "EMAIL_NOT_VERIFIED"
-
-            # Resend verification invalidates first token and issues a second
-            resend = client.post(
-                "/api/v1/auth/resend-verification",
-                json={"email": "alice@example.com"},
-            )
-            assert resend.status_code == 200
-            assert len(captured_tokens) == 2
-
-            # First token is now invalid
-            old_verify = client.post("/api/v1/auth/verify-email", json={"token": captured_tokens[0]})
-            assert old_verify.status_code == 400
-            assert old_verify.json()["detail"]["code"] == "TOKEN_INVALID_OR_EXPIRED"
-
-            # Second token verifies email
-            verify = client.post("/api/v1/auth/verify-email", json={"token": captured_tokens[1]})
-            assert verify.status_code == 200
-
             # Reusing verified token fails
-            reuse = client.post("/api/v1/auth/verify-email", json={"token": captured_tokens[1]})
+            reuse = client.post("/api/v1/auth/verify-email", json={"token": captured_tokens[2]})
             assert reuse.status_code == 400
             assert reuse.json()["detail"]["code"] == "TOKEN_INVALID_OR_EXPIRED"
 
